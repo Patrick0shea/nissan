@@ -1,0 +1,33 @@
+# Roadmap
+
+Timeframes are rough and assume about 15 h/week. The weeks are relative to the start (2026-10-12). Re-plan once the deadline is known (Q8).
+
+| # | Milestone | Done when | Weeks |
+|---|---|---|---|
+| **M0** | Project setup | Docs, skeleton, simulator probe (this commit) | 0 |
+| **M1** | Concrete volume checker on one toy protocol | A front end handles `load_labware`, `load_instrument`, `aspirate`, `dispense`, `pick_up_tip`, `drop_tip` and constant `for` loops. P1(a–c) are checked with concrete values on `tests/fixtures/toy_overfill.py`, with capacities from the labware definitions. | 1–2 |
+| **M2** | Symbolic parameters + Z3 | `add_parameters` domains become Z3 variables. P1 is checked ∀`p`, with witness output. `overfill.py` reports `vol > 120`. | 3–5 |
+| **M3** | Corpus front end | `get_values` and `fields.json` ingestion. Domain inference (D-006). `transfer`, `distribute`, `consolidate` and `mix` are lowered, with semantics checked against 9.0.0 source. Parameter-dependent loop bounds are handled for `range(param)` patterns. `UNSUPPORTED` reporting. Coverage is measured on D1. | 6–9 |
+| **M4** | P3 resources | Slot, labware, mount, well-index and tip-count checks, ∀`p`. | 10–11 |
+| **M5** | P2 contamination | Taint domain, labelling heuristic, and `new_tip` modes. | 12–14 |
+| **M6** | P4 timing | A spec format is decided, and delay and module-hold checks are implemented. May be descoped. | 15 |
+| **M7** | Baselines + D3 | B1, B2 and B2+ harness (parameter override for 9.0.0). B3 prompt frozen. Mutation generator built. Recall measured. | 16–18 |
+| **M8** | D2 + full evaluation | LLM protocols generated, all tools run, labelling with a second rater, results tables. | 19–22 |
+| **M9** | Write-up | Paper or thesis chapter, plus an artefact package. | 23–26 |
+
+## Risks
+- **Loop summarisation (M3).** Corpus loops over `range(num_samples)` with list slicing need symbolic trip counts. The fallback is bounded unrolling up to the domain maximum when that maximum is small (≤ 96 or 384), with the bound reported.
+- **Transfer semantics.** `transfer` and `distribute` have many keyword arguments. We support the common subset, mark the rest `UNSUPPORTED`, and measure how often each case occurs.
+- **Legacy domains.** If label parsing yields usable ranges for only about 25% of numeric fields (621/2187 have a hint), D1 results depend on inferred domains. This pushes the weight of the evaluation onto D2 and D3.
+- **The simulator already catches a lot at default values.** B2+ may close most of the gap. That is still a publishable, honest result if it is measured properly.
+
+## Open questions (need a decision from the user)
+- **Q1 / D-006.** How should numeric parameter domains for D1 be inferred?
+- **Q2.** What is the semantics of unknown initial well volumes?
+- **Q3.** What is the default sample/reagent labelling policy for P2?
+- **Q4.** Who is the second rater for labelling?
+- **Q5.** Is P4 (timing) in scope, and where does `t_min` come from?
+- **Q6 / Q7.** Which LLMs and what budget for B3 and D2?
+- **Q8.** What is the deadline and weekly time commitment, and how does this relate to the C++ analyser thesis?
+- **Q9.** The corpus has no licence. Can we publish derived data, or only IDs plus scripts?
+- **Q10.** Is the Flex in scope, or OT-2 only?

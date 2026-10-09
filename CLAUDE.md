@@ -1,0 +1,36 @@
+# otverify: formal verifier for Opentrons protocols
+
+A research prototype. It statically analyses Opentrons Python protocols (API v2) and proves safety properties hold for **all** runtime-parameter values in a declared range, or returns a counterexample assignment. Final-year SE research project.
+
+**Research question:** can static analysis plus SMT catch bugs in real lab-robot protocols that `opentrons_simulate` and LLM validators miss, especially parameter-dependent bugs? See `docs/GOAL.md`.
+
+## Read before working
+- `docs/GOAL.md`: hypotheses, scope, non-goals.
+- `docs/PROPERTIES.md`: the four properties and how each is checked.
+- `docs/DECISIONS.md`: append-only log. Check it before reopening a settled question.
+- `docs/ROADMAP.md`: the current milestone.
+
+## Layout
+- `src/otverify/`: the analyser package (stdlib `ast` + `z3-solver`).
+- `tests/`: pytest. Put protocol fixtures in `tests/fixtures/`.
+- `experiments/<date>-<name>/`: one-off probes with a README of results. These back claims made in the docs.
+- `scripts/`: corpus and baseline tooling.
+
+## Commands
+```
+python -m venv .venv && .venv/bin/pip install -e '.[dev]'
+.venv/bin/pytest
+.venv/bin/ruff check . && .venv/bin/ruff format --check .
+```
+Baseline simulator, in a **separate** venv (it must not be a dependency of the analyser):
+`uv venv -p 3.12 .venv-sim && uv pip install -p .venv-sim/bin/python opentrons==9.0.0`
+
+## Conventions
+- **Never execute protocol code in the analyser.** Analysis is purely static over `ast`. Only the baseline harness runs protocols.
+- **Never assume Opentrons API behaviour from memory.** Confirm it against the pinned package source (`opentrons==9.0.0`) or the docs, and record what you find in `DECISIONS.md`.
+- Every reported violation carries a source location and, where it applies, a concrete witness (parameter assignment and step).
+- Volumes are Z3 `Real` in µL. Times are seconds.
+- When a construct is unsupported, report it explicitly as `UNSUPPORTED`. Never skip it silently: soundness gaps must be countable.
+- Python ≥ 3.11, type hints throughout, `ruff` for lint and format.
+- Docs stay crisp. Mark unverified claims `UNVERIFIED`. Add a `DECISIONS.md` entry for every design choice. Never edit past entries; supersede them with a new one.
+- Evaluation numbers are reported honestly, including where the simulator does as well or better.
