@@ -73,3 +73,30 @@ Format: **D-NNN, date: title.** Then the decision, the alternatives considered, 
   - Aspirating without a tip raises `UnexpectedTipRemovalError`.
   - A p300 with 20 µL tips raises `KeyError: PipetteTipType.t20`, i.e. an incompatible tip. This is a future P3 check.
   - Multichannel (8): in a labware whose column has 8 wells, starting at row A, each channel uses one well. In a single-row labware (reservoir), all channels use the same well. Other layouts are reported as unsupported.
+
+**D-013, 2026-10-09: Runtime parameters. Finite parameters are enumerated. Interval parameters are Z3 constants.**
+- *Confirmed in opentrons 9.0.0 `protocols/parameters/validation.py`:*
+  - Every parameter needs either `choices` or both `minimum` and `maximum`. The two are mutually exclusive, both bounds are inclusive, and the default is validated against the domain.
+  - `add_str` also requires `choices`.
+  - `add_bool` is choices `[True, False]`.
+  - So every valid domain is either finite or a closed interval.
+- *Decision:*
+  - bool, str and numeric-with-choices parameters are enumerated, one lowered `Program` per combination with the defaults first. The cap is 256 combinations; beyond that, lowering stops with a reason.
+  - int/float parameters with min/max become `z3.Int`/`z3.Real`, and arithmetic on them builds terms that flow into volumes. `/` is lowered as real division (z3 `/` on Ints is integer division).
+  - A parameter-dependent value needed concretely stops lowering. That covers a branch condition, `range()` bound, index, slice, `//`, `%`, `int()` and a divisor.
+  - Invalid definitions (no domain, default outside its domain, duplicate name, CSV parameters, `add_parameters` below API 2.18) stop lowering and name the Opentrons error they would raise.
+- *Alternatives:* All parameters symbolic, which needs symbolic control flow everywhere (M3). Or all enumerated, which is sampling, not proof, for real intervals.
+- *Reason:* Finite domains are typically small (labware choice, mount, flags) and used in control flow, so enumerating them is exact. Intervals are where an optimiser searches, and where SMT gives an all-values answer.
+
+**D-014, 2026-10-09: How a symbolic check is reported.**
+- *Decision:* Each guard is checked as `SAT(domain ∧ ¬guard)`. On SAT:
+  - **Witness:** the minimum violating value of the first parameter, alphabetically, via `z3.Optimize`.
+  - **Violating range:** per parameter, its min and max over the violating set, marking open bounds, e.g. `(120, 300]`.
+  - **at_default:** whether the all-defaults assignment violates the guard. This is the H2 split between default-reachable and parameter-only bugs.
+  - Message amounts are evaluated at the witness.
+  - Z3 `unknown` (timeout 10 s) is reported as severity `unknown` (exit code 3). It is never reported as proved.
+  - After a violation the state is clamped, as in M1, so independent bugs still surface.
+- *Caveat:* A range is a per-parameter projection. With two or more parameters it over-approximates the violating region; e.g. `a ∈ [61, 300]` holds only together with `a + b > 360`.
+- *CLI:* findings are grouped by line. The representative is a default-reachable finding if there is one, otherwise the smallest witness.
+
+**D-015, 2026-10-09: Supersedes the last clause of D-006.** "An `add_int`/`add_float` with no min/max is unbounded" cannot happen. Opentrons rejects such a definition (D-013), so we report it as an invalid definition rather than an unbounded parameter.

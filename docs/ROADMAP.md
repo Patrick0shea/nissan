@@ -6,7 +6,7 @@ Timeframes are rough and assume about 15 h/week. The weeks are relative to the s
 |---|---|---|---|
 | **M0** ✅ | Project setup | Docs, skeleton, simulator probe (this commit) | 0 |
 | **M1** ✅ | Concrete volume checker on one toy protocol | A front end handles `load_labware`, `load_instrument`, `aspirate`, `dispense`, `pick_up_tip`, `drop_tip` and constant `for` loops. P1(a–c) are checked with concrete values on `tests/fixtures/toy_overfill.py`, with capacities from the labware definitions. | 1–2 |
-| **M2** | Symbolic parameters + Z3 | `add_parameters` domains become Z3 variables. P1 is checked ∀`p`, with witness output. `overfill.py` reports `vol > 120`. | 3–5 |
+| **M2** ✅ | Symbolic parameters + Z3 | `add_parameters` domains become Z3 variables. P1 is checked ∀`p`, with witness output. `overfill.py` reports `vol > 120`. | 3–5 |
 | **M3** | Corpus front end | `get_values` and `fields.json` ingestion. Domain inference (D-006). `transfer`, `distribute`, `consolidate` and `mix` are lowered, with semantics checked against 9.0.0 source. Parameter-dependent loop bounds are handled for `range(param)` patterns. `UNSUPPORTED` reporting. Coverage is measured on D1. | 6–9 |
 | **M4** | P3 resources | Slot, labware, mount, well-index and tip-count checks, ∀`p`. | 10–11 |
 | **M5** | P2 contamination | Taint domain, labelling heuristic, and `new_tip` modes. | 12–14 |
@@ -23,6 +23,13 @@ Timeframes are rough and assume about 15 h/week. The weeks are relative to the s
   - 6 use labware that is not in the snapshot (custom labware).
 
   So `get_values` ingestion (M3) is the gate to any corpus result.
+- **M2 (2026-10-09).** `add_parameters` is supported (D-013, D-014). The probe `overfill.py` reports P1a violated for `vol ∈ [121, 400]`, witness `vol=121`, and not reachable at the default of 100. The tip-capacity boundary agrees with the simulator on both sides (`experiments/2026-10-09-m2-tip-boundary/`). D1 coverage is unchanged (no `add_parameters` in the corpus), with 0 crashes over 833 files.
+  - **Carried into M3:** symbolic control flow (branches, `range(param)`, indices). The options:
+    - (a) Lazily enumerate an int parameter when it reaches a concrete-only position and its domain is small. This is exact, but it is enumeration rather than SMT, so report it separately.
+    - (b) Fork paths on symbolic branches, with path conditions in the domain.
+    - (c) Summarise loops.
+
+    Decide (a) vs (b) at the start of M3.
 
 ## Risks
 - **Loop summarisation (M3).** Corpus loops over `range(num_samples)` with list slicing need symbolic trip counts. The fallback is bounded unrolling up to the domain maximum when that maximum is small (≤ 96 or 384), with the bound reported.

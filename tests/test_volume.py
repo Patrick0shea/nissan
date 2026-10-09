@@ -44,13 +44,13 @@ def test_toy_overfill_reports_third_iteration() -> None:
     finding = result.violations[0]
     assert finding.context == (("_", 2),)
     assert "450 µL" in finding.message and "360 µL" in finding.message
-    assert result.unsupported is None
+    assert result.unsupported == []
     assert not result.unchecked_aspirations  # the reservoir is declared with load_liquid
 
 
 def test_toy_clean_has_no_findings() -> None:
     result = check_volumes(lower((FIXTURES / "toy_clean.py").read_text()))
-    assert result.findings == [] and result.unsupported is None
+    assert result.findings == [] and result.unsupported == []
 
 
 @pytest.mark.parametrize(("fixture", "code"), [("toy_overfill.py", 1), ("toy_clean.py", 0)])
@@ -253,14 +253,14 @@ def test_list_comprehension_and_module_constants() -> None:
     # Each dispense asks for 480 µL from a tip holding 120 µL (warning at API 2.13).
     assert [f.severity for f in result.findings] == ["warning"] * 3
     assert [f.context for f in result.findings] == [(("d", w),) for w in ("A1", "A2", "A3")]
-    assert result.unsupported is None
+    assert result.unsupported == []
 
 
 @pytest.mark.parametrize(
     ("body", "reason"),
     [
         ('p.transfer(100, res["A1"], plate["A1"])', "pipette.transfer"),
-        ("v = protocol.params.vol", "protocol.params.vol"),
+        ("v = protocol.params.vol", "there is no add_parameters()"),
         ('v = get_values("vol")', "get_values"),
         ('w = plate["H13"]', "well 'H13' does not exist"),
         ("while True:\n    pass", "While"),
@@ -269,18 +269,18 @@ def test_list_comprehension_and_module_constants() -> None:
 def test_unsupported_constructs_stop_with_reason(body: str, reason: str) -> None:
     result = check('p.pick_up_tip()\np.aspirate(400, res["A1"])\n' + body)
     assert props(result) == [(TIP_VOLUME, 9)]  # steps before the stop are still checked
-    assert result.unsupported is not None
-    assert result.unsupported.line == 10
-    assert reason in result.unsupported.reason
+    [stop] = result.unsupported
+    assert stop.line == 10
+    assert reason in stop.reason
 
 
 def test_missing_api_level_is_unsupported() -> None:
-    prog = lower("def run(protocol):\n    pass\n")
+    [prog] = lower("def run(protocol):\n    pass\n")
     assert prog.unsupported is not None and "apiLevel" in prog.unsupported.reason
 
 
 def test_unknown_labware_is_unsupported() -> None:
-    prog = lower(
+    [prog] = lower(
         'metadata = {"apiLevel": "2.13"}\n'
         "def run(protocol):\n"
         '    protocol.load_labware("my_custom_plate", 1)\n'

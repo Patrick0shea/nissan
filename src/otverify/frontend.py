@@ -1,19 +1,32 @@
-"""Lower an Opentrons Python protocol (API v2) to a `Program` by static evaluation over `ast`.
+"""Lower an Opentrons Python protocol (API v2) to `Program`s by static evaluation over `ast`.
 
-M1 scope: constant values only. Loops over `range(...)` or concrete lists are unrolled. Runtime
-parameters, `get_values` and the complex liquid-handling commands (`transfer` etc.) are not
-modelled yet. The protocol is never executed (D-002).
+Runtime parameters (`add_parameters`, API >= 2.18) are handled as follows (D-013):
+- Finite parameters (bool, or any `choices`) are enumerated. One Program is lowered per
+  combination, with the default combination first.
+- Interval parameters (int/float with minimum/maximum) become Z3 constants. Arithmetic on them
+  builds Z3 terms that flow into step volumes.
+
+A parameter-dependent value is fine as a volume. Anywhere a concrete value is needed (a branch
+condition, a loop bound, an index, a labware name) it stops lowering. Symbolic control flow is M3.
+
+Loops over `range(...)` or concrete lists are unrolled. `get_values` and the complex
+liquid-handling commands (`transfer` etc.) are not modelled yet. The protocol is never executed
+(D-002).
 
 The first construct we cannot model stops lowering. The steps before it are still analysed, and
-the stop is reported as `Program.unsupported`, so a partial analysis is never silent.
+the stop is reported as `Program.unsupported`, so a partial analysis is never silent (D-011).
 """
 
 import ast
+import copy
+import itertools
 import operator
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+import z3
 
 from otverify import definitions
 from otverify.model import (
@@ -24,13 +37,16 @@ from otverify.model import (
     LoadedLabware,
     LoadedPipette,
     LoadLiquid,
+    ParamSpec,
     PickUpTip,
     Program,
     Unsupported,
     WellRef,
 )
+from otverify.smt import is_sym, smax, smin, to_real
 
 MAX_STEPS = 200_000
+MAX_ASSIGNMENTS = 256  # combinations of finite-parameter values lowered separately
 
 # ProtocolContext / InstrumentContext methods that cannot change any liquid volume.
 _CTX_NOOPS = {"comment", "delay", "pause", "home", "set_rail_lights"}
@@ -45,7 +61,7 @@ _BINOPS: dict[type, Callable[[Any, Any], Any]] = {
     ast.Mod: operator.mod,
     ast.Pow: operator.pow,
 }
-_CMPOPS: dict[type, Callable[[Any, Any], bool]] = {
+_CMPOPS: dict[type, Callable[[Any, Any], Any]] = {
     ast.Eq: operator.eq,
     ast.NotEq: operator.ne,
     ast.Lt: operator.lt,
@@ -70,6 +86,20 @@ _BUILTINS: dict[str, Callable[..., Any]] = {
     "enumerate": lambda *a: list(enumerate(*a)),
 }
 
+# add_* method -> positional parameter names, as in opentrons 9.0.0 ParameterContext.
+_PARAM_METHODS = {
+    "add_int": ["display_name", "variable_name", "default", "minimum", "maximum", "choices"],
+    "add_float": ["display_name", "variable_name", "default", "minimum", "maximum", "choices"],
+    "add_bool": ["display_name", "variable_name", "default"],
+    "add_str": ["display_name", "variable_name", "default", "choices"],
+}
+_PARAM_TYPES: dict[str, tuple[type, ...]] = {
+    "int": (int,),
+    "float": (int, float),
+    "bool": (bool,),
+    "str": (str,),
+}
+
 
 class _Stop(Exception):
     def __init__(self, node: ast.AST, reason: str) -> None:
@@ -80,6 +110,14 @@ class _Stop(Exception):
 
 class _Ctx:
     """The ProtocolContext argument of run()."""
+
+
+class _ParamCtx:
+    """The ParameterContext argument of add_parameters()."""
+
+
+class _Params:
+    """`protocol.params`."""
 
 
 @dataclass(frozen=True)
@@ -97,7 +135,13 @@ class _Liquid:
 
 
 def _is_num(v: object) -> bool:
-    return isinstance(v, int | float) and not isinstance(v, bool)
+    return (isinstance(v, int | float) and not isinstance(v, bool)) or isinstance(v, z3.ArithRef)
+
+
+def _has_sym(v: object) -> bool:
+    if isinstance(v, list | tuple):
+        return any(_has_sym(x) for x in v)
+    return is_sym(v)
 
 
 def _parse_api_level(v: object) -> tuple[int, int] | None:
@@ -113,6 +157,8 @@ class _Lowerer:
     def __init__(self, prog: Program) -> None:
         self.prog = prog
         self.env: dict[str, Any] = {}
+        self.params: dict[str, Any] | None = None  # name -> concrete value or Z3 constant
+        self.param_specs: list[ParamSpec] = []
         self.context: list[tuple[str, object]] = []
         self.defs: list[definitions.LabwareDef] = []
         self.pip_defs: list[definitions.PipetteDef] = []
@@ -146,7 +192,7 @@ class _Lowerer:
                     finally:
                         self.context.pop()
             case ast.If(test=test, body=body, orelse=orelse):
-                self.body(body if self.expr(test) else orelse)
+                self.body(body if self.truth(test, self.expr(test)) else orelse)
             case _:
                 raise _Stop(s, f"statement `{type(s).__name__}` not modelled")
 
@@ -169,12 +215,23 @@ class _Lowerer:
             return self.env[name]
         raise _Stop(node, f"`{name}` has no statically known value")
 
+    def truth(self, node: ast.expr, v: Any) -> bool:
+        if is_sym(v):
+            raise _Stop(
+                node,
+                f"branch on parameter-dependent condition `{ast.unparse(node)}` "
+                "(symbolic control flow: M3)",
+            )
+        return bool(v)
+
     def expr(self, e: ast.expr) -> Any:
         match e:
             case ast.Constant(value=v):
                 return v
             case ast.Name(id=name):
                 return self.lookup(e, name)
+            case ast.Attribute(value=base, attr=attr):
+                return self.attribute(e, self.expr(base), attr)
             case ast.BinOp(left=left, op=op, right=right):
                 return self.binop(e, op, self.expr(left), self.expr(right))
             case ast.UnaryOp(op=ast.USub(), operand=x):
@@ -185,21 +242,16 @@ class _Lowerer:
             case ast.UnaryOp(op=ast.UAdd(), operand=x):
                 return self.expr(x)
             case ast.UnaryOp(op=ast.Not(), operand=x):
-                return not self.expr(x)
-            case ast.BoolOp(op=ast.And(), values=values):
-                return all(self.expr(v) for v in values)
-            case ast.BoolOp(op=ast.Or(), values=values):
-                return any(self.expr(v) for v in values)
+                return not self.truth(x, self.expr(x))
+            case ast.BoolOp(op=op, values=values):
+                v: Any = None
+                for node in values:
+                    v = self.expr(node)
+                    if self.truth(node, v) == isinstance(op, ast.Or):
+                        return v
+                return v
             case ast.Compare(left=left, ops=ops, comparators=rights):
-                lhs = self.expr(left)
-                for op, r in zip(ops, rights, strict=True):
-                    rhs = self.expr(r)
-                    if type(op) not in _CMPOPS:
-                        raise _Stop(e, f"comparison `{type(op).__name__}` not modelled")
-                    if not _CMPOPS[type(op)](lhs, rhs):
-                        return False
-                    lhs = rhs
-                return True
+                return self.compare(e, left, ops, rights)
             case ast.List(elts=elts) | ast.Tuple(elts=elts):
                 return [self.expr(x) for x in elts]
             case ast.Dict(keys=keys, values=values) if None not in keys:
@@ -213,25 +265,72 @@ class _Lowerer:
             case _:
                 raise _Stop(e, f"expression `{ast.unparse(e)}` not modelled")
 
+    def attribute(self, node: ast.AST, recv: Any, attr: str) -> Any:
+        if isinstance(recv, _Ctx) and attr == "params":
+            if self.params is None:
+                raise _Stop(node, "`protocol.params` used, but there is no add_parameters()")
+            return _Params()
+        if isinstance(recv, _Params):
+            if self.params is None or attr not in self.params:
+                raise _Stop(node, f"no runtime parameter named `{attr}`")
+            return self.params[attr]
+        raise _Stop(node, f"attribute `{ast.unparse(node)}` not modelled")  # type: ignore[arg-type]
+
+    def compare(
+        self, node: ast.AST, left: ast.expr, ops: list[ast.cmpop], rights: list[ast.expr]
+    ) -> Any:
+        lhs = self.expr(left)
+        symbolic: list[z3.BoolRef] = []
+        for op, r in zip(ops, rights, strict=True):
+            rhs = self.expr(r)
+            if type(op) not in _CMPOPS:
+                raise _Stop(node, f"comparison `{type(op).__name__}` not modelled")
+            if is_sym(lhs) or is_sym(rhs):
+                if not (_is_num(lhs) and _is_num(rhs)):
+                    raise _Stop(node, "comparison of a parameter with a non-number not modelled")
+                symbolic.append(_CMPOPS[type(op)](lhs, rhs))
+            elif not _CMPOPS[type(op)](lhs, rhs):
+                return False
+            lhs = rhs
+        return z3.And(*symbolic) if symbolic else True
+
     def binop(self, node: ast.AST, op: ast.operator, a: Any, b: Any) -> Any:
+        if is_sym(a) or is_sym(b):
+            if not (_is_num(a) and _is_num(b)):
+                raise _Stop(node, "arithmetic on a parameter and a non-number")
+            if isinstance(op, ast.Add | ast.Sub | ast.Mult):
+                return _BINOPS[type(op)](a, b)
+            if isinstance(op, ast.Div):
+                if is_sym(b):
+                    raise _Stop(node, "division by a parameter-dependent value not modelled")
+                if b == 0:
+                    raise _Stop(node, "division by zero")
+                return to_real(a) / b
+            raise _Stop(node, f"`{type(op).__name__}` on a parameter-dependent value not modelled")
         ok = (_is_num(a) and _is_num(b)) or (
             isinstance(op, ast.Add) and type(a) is type(b) and isinstance(a, list | str)
         )
         if not ok or type(op) not in _BINOPS:
             raise _Stop(node, f"operator `{type(op).__name__}` on these operands not modelled")
-        return _BINOPS[type(op)](a, b)
+        try:
+            return _BINOPS[type(op)](a, b)
+        except ArithmeticError as exc:
+            raise _Stop(node, f"arithmetic error: {exc}") from None
 
     def subscript(self, node: ast.AST, base: Any, index: ast.expr) -> Any:
         if isinstance(index, ast.Slice):
-            bounds = [
-                None if x is None else self.expr(x) for x in (index.lower, index.upper, index.step)
-            ]
+            parts = (index.lower, index.upper, index.step)
+            bounds = [None if x is None else self.expr(x) for x in parts]
+            if _has_sym(bounds):
+                raise _Stop(node, "slice bound depends on a parameter (M3)")
             if not isinstance(base, list) or not all(
                 b is None or isinstance(b, int) for b in bounds
             ):
                 raise _Stop(node, "slice not modelled")
             return base[slice(*bounds)]
         key = self.expr(index)
+        if is_sym(key):
+            raise _Stop(node, "index depends on a parameter (M3)")
         if isinstance(base, _Labware):
             return self.well(node, base, key)
         if isinstance(base, list | tuple) and isinstance(key, int) and not isinstance(key, bool):
@@ -257,7 +356,7 @@ class _Lowerer:
         try:
             for item in items:
                 self.bind(gen.target, item)
-                if all(self.expr(c) for c in gen.ifs):
+                if all(self.truth(c, self.expr(c)) for c in gen.ifs):
                     out.append(self.expr(elt))
         finally:
             self.env = saved
@@ -267,9 +366,8 @@ class _Lowerer:
 
     def args(self, call: ast.Call, names: list[str]) -> dict[str, ast.expr]:
         """Map positional and keyword arguments to parameter names (unevaluated)."""
-        if any(isinstance(a, ast.Starred) for a in call.args) or any(
-            k.arg is None for k in call.keywords
-        ):
+        starred = any(isinstance(a, ast.Starred) for a in call.args)
+        if starred or any(k.arg is None for k in call.keywords):
             raise _Stop(call, "*args / **kwargs not modelled")
         if len(call.args) > len(names):
             raise _Stop(call, "too many positional arguments")
@@ -278,16 +376,32 @@ class _Lowerer:
             bound[k.arg] = k.value  # type: ignore[index]
         return bound
 
+    def builtin(self, call: ast.Call, name: str) -> Any:
+        if call.keywords:
+            raise _Stop(call, f"keyword arguments to {name}() not modelled")
+        args = [self.expr(a) for a in call.args]
+        if _has_sym(args):
+            if name in ("min", "max") and len(args) >= 2 and all(_is_num(a) for a in args):
+                fold = smin if name == "min" else smax
+                result = args[0]
+                for a in args[1:]:
+                    result = fold(result, a)
+                return result
+            if name == "abs" and len(args) == 1:
+                return z3.If(args[0] >= 0, args[0], -args[0])
+            if name == "float" and len(args) == 1:
+                return to_real(args[0])
+            raise _Stop(call, f"`{name}()` of a parameter-dependent value (M3)")
+        try:
+            return _BUILTINS[name](*args)
+        except (TypeError, ValueError) as exc:
+            raise _Stop(call, f"{name}() on these arguments: {exc}") from None
+
     def call(self, call: ast.Call) -> Any:
         func = call.func
         if isinstance(func, ast.Name):
             if func.id in _BUILTINS and func.id not in self.env:
-                if call.keywords:
-                    raise _Stop(call, f"keyword arguments to {func.id}() not modelled")
-                try:
-                    return _BUILTINS[func.id](*(self.expr(a) for a in call.args))
-                except (TypeError, ValueError) as exc:
-                    raise _Stop(call, f"{func.id}() on these arguments: {exc}") from None
+                return self.builtin(call, func.id)
             raise _Stop(call, f"call to `{func.id}` not modelled")
         if not isinstance(func, ast.Attribute):
             raise _Stop(call, "call target not modelled")
@@ -295,6 +409,8 @@ class _Lowerer:
         method = func.attr
         if isinstance(recv, _Ctx):
             return self.ctx_call(call, method)
+        if isinstance(recv, _ParamCtx):
+            return self.param_call(call, method)
         if isinstance(recv, _Pipette):
             return self.pipette_call(call, recv, method)
         if isinstance(recv, _Labware):
@@ -306,6 +422,47 @@ class _Lowerer:
             return None
         raise _Stop(call, f"method `.{method}()` not modelled")
 
+    def param_call(self, call: ast.Call, method: str) -> None:
+        if method == "add_csv_file":
+            raise _Stop(call, "CSV runtime parameters not modelled")
+        if method not in _PARAM_METHODS:
+            raise _Stop(call, f"`parameters.{method}()` not modelled")
+        a = {k: self.expr(v) for k, v in self.args(call, _PARAM_METHODS[method]).items()}
+        kind = method.removeprefix("add_")
+        name, default = a.get("variable_name"), a.get("default")
+        if not isinstance(name, str) or any(p.name == name for p in self.param_specs):
+            raise _Stop(call, f"missing or duplicate variable_name {name!r}")
+        types = _PARAM_TYPES[kind]
+        if not isinstance(default, types) or (kind != "bool" and isinstance(default, bool)):
+            raise _Stop(call, f"default of `{name}` has the wrong type (ParameterValueError)")
+        minimum, maximum, raw_choices = a.get("minimum"), a.get("maximum"), a.get("choices")
+        choices: tuple[object, ...] | None = None
+        if kind == "bool":
+            choices = (False, True)
+        elif raw_choices is not None:
+            if minimum is not None or maximum is not None:
+                raise _Stop(
+                    call, f"`{name}` has both choices and min/max (ParameterDefinitionError)"
+                )
+            if not isinstance(raw_choices, list) or not all(
+                isinstance(c, dict) and isinstance(c.get("value"), types) for c in raw_choices
+            ):
+                raise _Stop(call, f"malformed choices for `{name}` (ParameterDefinitionError)")
+            choices = tuple(c["value"] for c in raw_choices)
+            if default not in choices:
+                raise _Stop(call, f"default of `{name}` is not one of its choices")
+        elif kind in ("int", "float") and isinstance(minimum, types) and isinstance(maximum, types):
+            if not minimum <= default <= maximum:
+                raise _Stop(call, f"default of `{name}` is outside [{minimum}, {maximum}]")
+        else:
+            raise _Stop(
+                call,
+                f"`{name}` needs choices, or both minimum and maximum (ParameterDefinitionError)",
+            )
+        self.param_specs.append(
+            ParamSpec(name, kind, default, minimum, maximum, choices, call.lineno)
+        )
+
     def ctx_call(self, call: ast.Call, method: str) -> Any:
         if method in _CTX_NOOPS:
             return None
@@ -316,6 +473,8 @@ class _Lowerer:
             if "load_name" not in a or "location" not in a:
                 raise _Stop(call, "load_labware without load_name/location")
             load_name, location = self.expr(a["load_name"]), self.expr(a["location"])
+            if is_sym(location):
+                raise _Stop(call, "deck slot depends on a parameter")
             lw_def = definitions.labware(load_name) if isinstance(load_name, str) else None
             if lw_def is None:
                 raise _Stop(call, f"labware {load_name!r} is not in the definitions snapshot")
@@ -375,7 +534,7 @@ class _Lowerer:
             volume = self.expr(a["volume"]) if "volume" in a else None
             if not _is_num(volume):
                 raise _Stop(call, "load_liquid volume is not a number")
-            self.emit(LoadLiquid(call.lineno, self.ctx(), well, float(volume)))
+            self.emit(LoadLiquid(call.lineno, self.ctx(), well, _num(volume)))
             return None
         raise _Stop(call, f"`well.{method}()` not modelled")
 
@@ -397,7 +556,7 @@ class _Lowerer:
             well = self.location(call, pip, a.get("location"))
             self.last_location[pip.index] = well
             wells = self.channel_wells(call, pip, well)
-            vol = None if volume is None else float(volume)
+            vol = None if volume is None else _num(volume)
             cls = Aspirate if method == "aspirate" else Dispense
             self.emit(cls(call.lineno, self.ctx(), pip.index, wells, vol))
         else:
@@ -436,48 +595,110 @@ class _Lowerer:
         self.prog.steps.append(step)
 
 
+def _num(v: Any) -> Any:
+    return v if is_sym(v) else float(v)
+
+
 def _render(v: object) -> object:
     if isinstance(v, WellRef):
         return v.well
     if isinstance(v, int | float | str | bool) or v is None:
         return v
+    if is_sym(v):
+        return str(v)
     return type(v).__name__
 
 
-def lower(source: str) -> Program:
-    """Lower protocol source to a Program. Raises SyntaxError if the source does not parse."""
+def _assignments(specs: list[ParamSpec]) -> list[dict[str, object]]:
+    """All combinations of finite-parameter values, the all-defaults combination first."""
+    finite = [p for p in specs if p.finite]
+    options = [[p.default, *(c for c in p.choices or () if c != p.default)] for p in finite]
+    return [
+        {p.name: v for p, v in zip(finite, combo, strict=True)}
+        for combo in itertools.product(*options)
+    ]
+
+
+def _symbol(p: ParamSpec) -> z3.ArithRef:
+    return z3.Int(p.name) if p.kind == "int" else z3.Real(p.name)
+
+
+def lower(source: str) -> list[Program]:
+    """Lower protocol source to one Program per finite-parameter assignment.
+
+    Raises SyntaxError if the source does not parse.
+    """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", SyntaxWarning)  # e.g. invalid escapes in corpus strings
         tree = ast.parse(source)
-    prog = Program()
-    lowerer = _Lowerer(prog)
+    base = _Lowerer(Program())
     run: ast.FunctionDef | None = None
+    add_parameters: ast.FunctionDef | None = None
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == "run":
             run = node
+        elif isinstance(node, ast.FunctionDef) and node.name == "add_parameters":
+            add_parameters = node
         elif isinstance(node, ast.Assign):
             # Module-level constants and the metadata/requirements dicts. Anything we cannot
             # evaluate is left unbound; a later use of it stops lowering with a clear reason.
             try:
-                lowerer.stmt(node)
+                base.stmt(node)
             except _Stop:
                 pass
+    api_level = None
     for meta in ("requirements", "metadata"):
-        d = lowerer.env.get(meta)
+        d = base.env.get(meta)
         if isinstance(d, dict) and "apiLevel" in d:
-            prog.api_level = _parse_api_level(d["apiLevel"])
+            api_level = _parse_api_level(d["apiLevel"])
             break
-    if prog.api_level is None:
-        prog.unsupported = Unsupported(1, "no valid apiLevel in metadata or requirements")
-        return prog
+
+    def failed(line: int, reason: str) -> list[Program]:
+        return [Program(api_level=api_level, unsupported=Unsupported(line, reason))]
+
+    if api_level is None:
+        return failed(1, "no valid apiLevel in metadata or requirements")
     if run is None or len(run.args.args) != 1:
-        prog.unsupported = Unsupported(1, "no `run(protocol)` function")
-        return prog
-    lowerer.env[run.args.args[0].arg] = _Ctx()
-    try:
-        lowerer.body(run.body)
-    except _Stop as stop:
-        prog.unsupported = Unsupported(stop.line, stop.reason)
-    except RecursionError:
-        prog.unsupported = Unsupported(run.lineno, "expression nesting too deep")
-    return prog
+        return failed(1, "no `run(protocol)` function")
+
+    specs: list[ParamSpec] = []
+    if add_parameters is not None:
+        if api_level < (2, 18):
+            return failed(add_parameters.lineno, "add_parameters() requires apiLevel >= 2.18")
+        if len(add_parameters.args.args) != 1:
+            return failed(add_parameters.lineno, "add_parameters() must take one argument")
+        reader = _Lowerer(Program())
+        reader.env = copy.deepcopy(base.env)
+        reader.env[add_parameters.args.args[0].arg] = _ParamCtx()
+        try:
+            reader.body(add_parameters.body)
+        except _Stop as stop:
+            return failed(stop.line, stop.reason)
+        specs = reader.param_specs
+
+    assignments = _assignments(specs)
+    if len(assignments) > MAX_ASSIGNMENTS:
+        return failed(
+            add_parameters.lineno if add_parameters else 1,
+            f"{len(assignments)} combinations of finite parameters (limit {MAX_ASSIGNMENTS})",
+        )
+    symbols = {p.name: _symbol(p) for p in specs if not p.finite}
+
+    programs = []
+    for assignment in assignments:
+        prog = Program(
+            api_level=api_level, params=tuple(specs), assignment=assignment, symbols=symbols
+        )
+        lowerer = _Lowerer(prog)
+        lowerer.env = copy.deepcopy(base.env)
+        lowerer.env[run.args.args[0].arg] = _Ctx()
+        if add_parameters is not None:
+            lowerer.params = {**assignment, **symbols}
+        try:
+            lowerer.body(run.body)
+        except _Stop as stop:
+            prog.unsupported = Unsupported(stop.line, stop.reason)
+        except RecursionError:
+            prog.unsupported = Unsupported(run.lineno, "expression nesting too deep")
+        programs.append(prog)
+    return programs
