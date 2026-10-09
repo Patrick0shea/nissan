@@ -4,7 +4,6 @@ from pathlib import Path
 import z3
 
 import otverify
-from otverify.cli import main
 
 PROBE = Path(__file__).parent.parent / "experiments" / "2026-10-09-simulator-probe" / "overfill.py"
 
@@ -26,7 +25,3 @@ def test_probe_protocol_parses() -> None:
     tree = ast.parse(PROBE.read_text())
     names = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
     assert {"add_parameters", "run"} <= names
-
-
-def test_cli_stub_reports_not_implemented() -> None:
-    assert main([str(PROBE)]) == 2

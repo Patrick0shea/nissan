@@ -3,7 +3,7 @@
 ## Common model
 - **Parameters.** `P` is a vector of protocol parameters with a domain `D`: integer or real intervals, finite choice sets, and booleans. A property holds iff it holds on **every** execution for **every** `p ∈ D`. A violation is reported with a witness `p*` and the failing step.
 - **State.** Each well `w` has a volume `v(w)` (µL, Z3 `Real`), a capacity `C(w)` = `totalLiquidVolume` from the labware definition, and a set of liquid labels `L(w)`. Each pipette has a tip state (none, or a tip with volume and labels) and a tip-rack cursor.
-- **Initial volumes.** Taken from `load_liquid` where it is present. Otherwise **unknown**. See open question Q2 and the "Precise definition" bullets below.
+- **Initial volumes.** Taken from `load_liquid` where it is present. Otherwise **unknown**, and tracked as a lower bound starting at 0 (D-009, provisional pending Q2).
 - **Front end.** We parse with `ast`, resolve `load_labware`, `load_instrument` and `params`/`get_values` bindings, and lower `transfer`/`distribute`/`consolidate`/`mix` into primitive `aspirate`, `dispense`, `pick_up_tip` and `drop_tip` steps. Their expansion semantics, such as splitting volumes above the pipette's maximum and `disposal_volume`, must be confirmed against `opentrons==9.0.0` source before we model them. Loops with concrete trip counts are unrolled. Loops whose trip count depends on a parameter need a summary, which is the main technical risk (see ROADMAP M3).
 
 ---

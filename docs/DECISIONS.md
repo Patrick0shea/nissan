@@ -46,3 +46,30 @@ Format: **D-NNN, date: title.** Then the decision, the alternatives considered, 
 
 **D-008, 2026-10-09: Python ≥ 3.11 for the analyser. Packaging uses setuptools, a `src/` layout and the package name `otverify`.**
 - *Reason:* 3.11 is the oldest Python still in common use. `ast` covers `match` statements. The baseline venv uses 3.12. The package name is a placeholder and can be renamed cheaply now.
+
+**D-009, 2026-10-09 (provisional, pending Q2): Unknown starting volumes are tracked as a lower bound starting at 0.**
+- *Decision:* A well has a known volume only if the protocol declares it with `load_liquid`. Otherwise we track a lower bound starting at 0.
+  - An overflow is reported only when the lower bound exceeds capacity. That is certain whatever the starting volume was.
+  - An aspirate from a well with unknown contents is not checked. It is counted and reported as "not checked".
+- *Alternatives:* Assume empty (every aspirate from an undeclared reservoir becomes a false positive), assume full (hides depletion bugs), or require annotations (cannot be applied to the corpus).
+- *Reason:* No false positives come from the starting-volume assumption, and the gap stays visible. Revisit once Q2 is decided. P1(b) recall depends on it.
+
+**D-010, 2026-10-09: Labware and pipette data are snapshotted into `src/otverify/data/opentrons_9_0_0.json`. This resolves the open part of D-007.**
+- *Decision:* `scripts/snapshot_opentrons_data.py` runs in the baseline venv. It records all 138 v2 labware definitions (latest version of each; ordering plus `totalLiquidVolume`, stored per well when not uniform) and the max/min volume and channels of the 12 OT-2 pipettes, read from the live `opentrons` 9.0.0 API.
+- *Alternatives:* Depend on `opentrons-shared-data` at runtime (pulls in numpy and pydantic).
+- *Reason:* The analyser stays dependency-light. I confirmed that `opentrons-shared-data` 9.0.0 is Apache-2.0 (dist-info `License-Expression`), so its licence ships alongside the snapshot (`data/LICENSE-opentrons-shared-data`).
+
+**D-011, 2026-10-09: The front end stops at the first construct it cannot model. Analysis covers that prefix only.**
+- *Alternatives:* Skip the unknown statement and continue.
+- *Reason:* A skipped `drop_tip`, `dispense` or assignment silently corrupts the later state, causing false positives and false negatives. Stopping keeps every reported finding sound with respect to the model. The stop point and reason are always reported (CLI exit code 3), and give coverage numbers for H4.
+
+**D-012, 2026-10-09: P1 semantics confirmed against opentrons 9.0.0 (docstrings and simulator probes).**
+- *Facts used by `volume.py`:*
+  - `aspirate(None)` fills the tip to min(pipette max, tip capacity). A p300 with 200 µL filter tips aspirates 200, and 250 raises "Cannot aspirate more than pipette max volume".
+  - `aspirate(0)` behaves like `None` below API 2.16 and does nothing from 2.16.
+  - `dispense(None)` empties the tip.
+  - `dispense(0)` empties the tip up to API 2.16 and does nothing from 2.17.
+  - Dispensing more than the tip holds raises `InvalidDispenseVolumeError` from API 2.17. At 2.13 the simulator logs "Dispensing 80.0 uL" with 50 in the tip and raises no error. We report a *warning* and model "empties the tip", as the docstring says.
+  - Aspirating without a tip raises `UnexpectedTipRemovalError`.
+  - A p300 with 20 µL tips raises `KeyError: PipetteTipType.t20`, i.e. an incompatible tip. This is a future P3 check.
+  - Multichannel (8): in a labware whose column has 8 wells, starting at row A, each channel uses one well. In a single-row labware (reservoir), all channels use the same well. Other layouts are reported as unsupported.
