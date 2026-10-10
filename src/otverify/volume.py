@@ -608,7 +608,14 @@ def check_volumes(programs: Program | list[Program]) -> Result:
         if fingerprint in seen:
             continue
         seen.add(fingerprint)
-        _Checker(prog, result).run()
+        try:
+            _Checker(prog, result).run()
+        except Exception as exc:  # noqa: BLE001 - a gap in our model, never a crash
+            gap = Unsupported(
+                0, f"internal error in checker (otverify bug): {type(exc).__name__}: {exc}"
+            )
+            if gap not in result.unsupported:
+                result.unsupported.append(gap)
         for gap in [prog.unsupported, *prog.notes]:
             if gap and gap not in result.unsupported:
                 result.unsupported.append(gap)

@@ -232,11 +232,15 @@ class _ModuleRef:
     name: str
 
 
-@dataclass(frozen=True)
+@dataclass(eq=False)
 class _HwModule:
     """A hardware module from load_module() (magnetic, temperature, thermocycler, ...)."""
 
     location: str
+    kind: str = ""
+    # Attributes we track: magnetic `status` ("engaged"/"disengaged", confirmed in 9.0.0
+    # MagneticModuleContext.status) and thermocycler `lid_position` ("open"/"closed").
+    state: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -327,6 +331,9 @@ class _Lowerer:
         self.depth = 0
         self.attrs: dict[tuple[Any, str], Any] = {}  # custom attributes set on wells, labware...
         self.tip_attached: dict[int, bool] = {}
+        # What the pipette reports as current_volume: the plunger volume (liquid + air), with
+        # Opentrons' own clamps where they are concrete.
+        self.tip_volume: dict[int, Any] = {}
 
     # ---- statements -------------------------------------------------------------------------
 
@@ -451,6 +458,8 @@ class _Lowerer:
 
     def if_stmt(self, s: ast.stmt, test: ast.expr, body: list, orelse: list) -> None:
         cond = self.expr(test)
+        if isinstance(cond, z3.ArithRef):
+            cond = cond != 0
         if _symbols_in(cond) and is_sym(cond):
             decided = self.decide(cond)
             if decided is None and (_only_raises(body) or _only_raises(orelse)):
@@ -472,6 +481,8 @@ class _Lowerer:
         return isinstance(self.env[root.id], _Ctx | _Pipette | _HwModule | _Labware | WellRef)
 
     def delete(self, target: ast.expr) -> None:
+        if self.is_setting(target):
+            return
         if isinstance(target, ast.Name):
             self.env.pop(target.id, None)
             return
@@ -550,6 +561,10 @@ class _Lowerer:
         return None
 
     def truth(self, node: ast.expr, v: Any) -> bool:
+        if isinstance(v, z3.ArithRef):
+            v = v != 0  # `if vol:` tests a number
+        if isinstance(v, _Opaque):
+            raise _Stop(node, f"branch on `{ast.unparse(node)}`, a value we do not model")
         if is_sym(v) and isinstance(v, z3.BoolRef):
             decided = self.decide(v)
             if decided is not None:
@@ -663,18 +678,22 @@ class _Lowerer:
             ):
                 return _Opaque()
         if isinstance(recv, _Ctx) and attr == "loaded_labwares":
-            return {_slot_key(lw.location): _Labware(i) for i, lw in enumerate(self.prog.labware)}
+            loaded: dict[Any, Any] = {
+                _slot_key(lw.location): _Labware(i) for i, lw in enumerate(self.prog.labware)
+            }
+            if (self.prog.api_level or (2, 0)) < (2, 16):
+                loaded[12] = _Trash()  # the OT-2 fixed trash is a labware in slot 12
+            return loaded
         if isinstance(recv, _Ctx) and attr == "loaded_instruments":
             return {p.mount: _Pipette(i) for i, p in enumerate(self.prog.pipettes)}
-        if isinstance(recv, _Ctx) and attr in (
-            "deck",
-            "max_speeds",
-            "rail_lights_on",
-            "door_closed",
+        if isinstance(recv, _Ctx) and (
+            attr in ("deck", "max_speeds", "rail_lights_on", "door_closed") or attr.startswith("_")
         ):
-            return _Opaque()
+            return _Opaque()  # settings and private hardware access (e.g. rail lights)
+        if isinstance(recv, _HwModule) and attr in recv.state:
+            return recv.state[attr]
         if isinstance(recv, _HwModule | _Opaque):
-            return _Opaque()  # module status, lid position, ...: no effect on volumes
+            return _Opaque()  # e.g. temperature: no effect on volumes
         if isinstance(recv, _Instance):
             if attr in recv.attrs:
                 return recv.attrs[attr]
@@ -702,7 +721,19 @@ class _Lowerer:
             return [_Labware(i) for i in loaded.tip_racks]
         if attr == "has_tip":
             return self.tip_attached.get(pip.index, False)
-        if attr in ("flow_rate", "well_bottom_clearance", "starting_tip", "hw_pipette", "speed",
+        if attr == "type":
+            return "single" if pip_def.channels == 1 else "multi"
+        if attr == "hw_pipette":
+            return {
+                "has_tip": self.tip_attached.get(pip.index, False),
+                "channels": pip_def.channels,
+                "max_volume": pip_def.max_volume,
+                "min_volume": pip_def.min_volume,
+                "name": loaded.name,
+            }
+        if attr == "current_volume":
+            return self.tip_volume.get(pip.index, 0.0)
+        if attr in ("flow_rate", "well_bottom_clearance", "starting_tip", "speed",
                     "default_speed", "api_version", "type"):  # fmt: skip
             return _Opaque()
         raise _Stop(node, f"pipette attribute `{attr}` not modelled")
@@ -714,8 +745,13 @@ class _Lowerer:
             return well.well
         if attr == "parent":
             return _Labware(well.labware)
-        if attr in ("diameter", "width", "length", "depth", "geometry", "has_tip"):
-            return _Opaque()  # geometry: only used for positions, which do not affect volumes
+        if attr in ("depth", "diameter", "width", "length"):
+            geometry = self.defs[well.labware].geometry.get(well.well)
+            if geometry is None:
+                return _Opaque()
+            return geometry[("depth", "diameter", "width", "length").index(attr)]
+        if attr in ("geometry", "has_tip"):
+            return _Opaque()
         raise _Stop(node, f"well attribute `{attr}` not modelled")
 
     def compare(
@@ -727,6 +763,12 @@ class _Lowerer:
             rhs = self.expr(r)
             if type(op) not in _CMPOPS:
                 raise _Stop(node, f"comparison `{type(op).__name__}` not modelled")
+            if isinstance(lhs, _Opaque) or isinstance(rhs, _Opaque):
+                raise _Stop(
+                    node,
+                    f"comparison `{ast.unparse(node)}` involves well geometry or another value "
+                    "we do not model",
+                )
             if is_sym(lhs) or is_sym(rhs):
                 if not (_is_num(lhs) and _is_num(rhs)) or isinstance(op, ast.Is | ast.IsNot):
                     self.concrete(node, [lhs, rhs], f"comparison `{ast.unparse(node)}`")
@@ -734,7 +776,11 @@ class _Lowerer:
             else:
                 if _symbols_in([lhs, rhs]):
                     self.concrete(node, [lhs, rhs], f"comparison `{ast.unparse(node)}`")
-                if not _CMPOPS[type(op)](lhs, rhs):
+                try:
+                    holds = _CMPOPS[type(op)](lhs, rhs)
+                except TypeError as exc:
+                    raise _Stop(node, f"comparison `{ast.unparse(node)}`: {exc}") from None
+                if not holds:
                     return False
             lhs = rhs
         return z3.And(*symbolic) if symbolic else True
@@ -1130,13 +1176,22 @@ class _Lowerer:
             a = self.args(call, ["module_name", "location", "configuration"])
             location = self.expr(a["location"]) if "location" in a else None
             self.concrete(call, location, "module slot")
-            return _HwModule(str(location) if location is not None else "thermocycler")
+            name = self.expr(a["module_name"]) if "module_name" in a else ""
+            kind = str(name).lower()
+            mod = _HwModule(str(location) if location is not None else "thermocycler", kind)
+            if "magnetic" in kind or "magdeck" in kind:
+                mod.state["status"] = "disengaged"
+            return mod
         raise _Stop(call, f"`protocol.{method}()` not modelled")
 
     def hw_module_call(self, call: ast.Call, mod: _HwModule, method: str) -> Any:
         if method in ("load_labware", "load_labware_by_name"):
             a = self.args(call, ["load_name", "label", "namespace", "version"])
             return self.load_labware(call, f"module in {mod.location}", a)
+        if method in ("engage", "disengage") and "status" in mod.state:
+            mod.state["status"] = "engaged" if method == "engage" else "disengaged"
+        if method in ("open_lid", "close_lid"):
+            mod.state["lid_position"] = "open" if method == "open_lid" else "closed"
         # Temperature, magnet, lid, shaking and latch commands do not move liquid.
         return None
 
@@ -1449,10 +1504,45 @@ class _Lowerer:
         if len(self.prog.steps) >= MAX_STEPS:
             raise _Stop(ast.Pass(lineno=step.line), f"more than {MAX_STEPS} steps")
         self.prog.steps.append(step)
+        self.track_tip(step)
+
+    def track_tip(self, step: Any) -> None:
+        """current_volume and has_tip, for protocols that branch on them."""
+        if not hasattr(step, "pipette"):
+            return
+        i = step.pipette
+        cur = self.tip_volume.get(i, 0.0)
+        cap = self.prog.pipettes[i].tip_capacity
+        api = self.prog.api_level or (2, 0)
+        if isinstance(step, PickUpTip):
+            self.tip_attached[i], cur = True, 0.0
+        elif isinstance(step, DropTip):
+            self.tip_attached[i], cur = False, 0.0
+        elif isinstance(step, Aspirate | AirGap):
+            vol = step.volume
+            if vol is None or (isinstance(step, Aspirate) and api < (2, 16) and _is_zero(vol)):
+                cur = cap
+            else:
+                cur = cur + vol
+        elif isinstance(step, Dispense):
+            vol = step.volume
+            if vol is None or (api <= (2, 16) and _is_zero(vol)):
+                cur = 0.0
+            elif not is_sym(vol) and not is_sym(cur):
+                cur = max(0.0, cur - vol)
+            else:
+                cur = cur - vol
+        elif isinstance(step, BlowOut):
+            cur = 0.0
+        self.tip_volume[i] = cur
 
 
 def _slot_key(location: str) -> object:
     return int(location) if location.isdigit() else location
+
+
+def _is_zero(v: Any) -> bool:
+    return not is_sym(v) and v == 0
 
 
 def _num(v: Any) -> Any:
@@ -1552,7 +1642,9 @@ def lower(
             run = node
         elif isinstance(node, ast.FunctionDef) and node.name == "add_parameters":
             add_parameters = node
-        elif isinstance(node, ast.Assign | ast.Import | ast.ImportFrom | ast.FunctionDef):
+        elif isinstance(
+            node, ast.Assign | ast.Import | ast.ImportFrom | ast.FunctionDef | ast.ClassDef
+        ):
             # Module-level constants, imports, helpers and the metadata/requirements dicts.
             # Anything we cannot evaluate is left unbound; a later use stops lowering clearly.
             try:
@@ -1647,6 +1739,10 @@ def lower(
                 prog.unsupported = Unsupported(stop.line, stop.reason)
             except RecursionError:
                 prog.unsupported = Unsupported(run.lineno, "expression nesting too deep")
+            except Exception as exc:  # noqa: BLE001 - a gap in our model, never a crash
+                prog.unsupported = Unsupported(
+                    run.lineno, f"internal error (otverify bug): {type(exc).__name__}: {exc}"
+                )
             programs.append(prog)
         if not promote:
             return programs

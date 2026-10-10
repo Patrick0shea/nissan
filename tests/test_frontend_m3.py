@@ -35,7 +35,11 @@ def check(body: str, fields: list | None = None, labware: list | None = None) ->
 def dispensed(body: str) -> list[tuple[str, float]]:
     [prog] = lower_body(body)
     assert prog.unsupported is None, prog.unsupported
-    return [(s.wells[0].well, s.volume) for s in prog.steps if isinstance(s, Dispense)]
+    return [
+        (s.wells[0].well if s.wells else "trash", s.volume)
+        for s in prog.steps
+        if isinstance(s, Dispense)
+    ]
 
 
 def test_helper_function_with_defaults_and_return() -> None:
@@ -216,7 +220,7 @@ def test_aspirate_steps_record_helper_context() -> None:
         ("x = lambda v: v", "lambda"),
         ("def f(*a):\n    pass\nf(1)", "*args"),
         ("def f():\n    f()\nf()", "call depth"),
-        ("x = p.current_volume", "pipette attribute `current_volume`"),
+        ("x = ctx.commands()", "`protocol.commands()` not modelled"),
         ("import os\nos.listdir('.')", "call to `os.listdir`"),
     ],
 )
@@ -306,3 +310,84 @@ def test_protocol_raise_inside_try_runs_the_handler() -> None:
             p.dispense(15, plate["A1"])
     """
     assert dispensed(body) == [("A1", 15.0)]
+
+
+def test_branch_on_unmodelled_module_state_stops_with_a_reason() -> None:
+    body = (
+        'temp = ctx.load_module("temperature module gen2", 7)\nif temp.status == "idle":\n    pass'
+    )
+    [prog] = lower_body(body)
+    assert prog.unsupported is not None and "we do not model" in prog.unsupported.reason
+
+
+def test_well_geometry_from_definitions() -> None:
+    # Values as opentrons 9.0.0 reports them (labware definition version 1; width = yDimension).
+    body = """
+        p.pick_up_tip()
+        h = plate["A1"].diameter
+        if h < 7 and res["A1"].width > 70 and res["A1"].length < 9 and plate["A1"].width is None:
+            p.aspirate(res["A1"].depth, res["A1"])
+            p.dispense(res["A1"].depth, plate["A1"])
+    """
+    assert dispensed(body) == [("A1", 26.85)]
+
+
+def test_pipette_type_current_volume_and_module_state() -> None:
+    body = """
+        mag = ctx.load_module("magnetic module gen2", 4)
+        p.pick_up_tip()
+        p.aspirate(50, res["A1"])
+        p.air_gap(10)
+        if p.type == "single" and p.current_volume == 60 and p.hw_pipette["has_tip"]:
+            mag.engage()
+        if mag.status == "engaged":
+            p.dispense(60, plate["A1"])
+        if p.current_volume == 0:
+            p.drop_tip()
+        tr = ctx.loaded_labwares[12].wells()[0]
+        p.pick_up_tip()
+        p.aspirate(10, res["A1"])
+        p.dispense(10, tr)
+    """
+    assert dispensed(body) == [("A1", 60.0), ("trash", 10.0)]
+
+
+def test_comparison_type_error_stops_with_a_reason() -> None:
+    [prog] = lower_body("x = None\nif 'a' in x:\n    pass")
+    assert prog.unsupported is not None and "not iterable" in prog.unsupported.reason
+
+
+def test_truthiness_of_a_parameter() -> None:
+    fields = [{"type": "float", "label": "Volume (0-100)", "name": "vol", "default": 0.0}]
+    body = """
+        [vol] = get_values("vol")
+        if vol:
+            p.pick_up_tip()
+    """
+    [stop] = check(body, fields=fields).unsupported
+    assert "depends on parameter(s) ['vol']" in stop.reason
+
+
+def test_module_level_class_and_settings_deletion() -> None:
+    src = dedent(
+        """
+        metadata = {"apiLevel": "2.13"}
+
+        class Token:
+            def __init__(self):
+                self.on = True
+
+        def run(ctx):
+            ctx.max_speeds["A"] = 100
+            del ctx.max_speeds["A"]
+            ctx._hw_manager.hardware.set_lights(rails=True)
+            token = Token()
+            tips = ctx.load_labware("opentrons_96_tiprack_300ul", 1)
+            plate = ctx.load_labware("corning_96_wellplate_360ul_flat", 2)
+            p = ctx.load_instrument("p300_single_gen2", "left", tip_racks=[tips])
+            if token.on and str(plate["B3"]).split()[0] == "B3":
+                p.pick_up_tip()
+        """
+    )
+    [prog] = lower(src)
+    assert prog.unsupported is None and len(prog.steps) == 1

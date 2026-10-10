@@ -177,3 +177,17 @@ Format: **D-NNN, date: title.** Then the decision, the alternatives considered, 
   - Below the bound, aspirates are still assumed to get the volume they ask for. This is the protocol's intent and the D-009 reading: "at least X (even if it started empty)" means assuming the sources supplied what was asked.
 - *Found by:* triage of corpus finding `05f673`. `mix(3, 1000)` in a 360 µL well was being reported as a 1000 µL *overflow* of that well. The real bug is that no 360 µL well can supply 1000 µL.
 - *Effect on the probe fixture:* `overfill.py` aspirates 3 × vol from A1 of the same 360 µL plate. Its first certain failure is now that overdraw, for vol ∈ [121, 400]. The B1 overflow is no longer certain, because A1 could not have supplied the liquid.
+
+**D-024, 2026-10-10: Model well geometry, pipette state and module state instead of making them opaque.**
+- *What exposed it:* in the M3 corpus run, comparisons with opaque values crashed (45 protocols) or, worse, silently evaluated (`_Opaque == "multi"` is False). The fix makes such comparisons stop with a reason. That dropped "fully analysed" from 364 to an honest 325, and these values are now modelled for real.
+- *Labware definition versions:*
+  - Capacities and well ordering are identical across every version of all 55 multi-version labware.
+  - Geometry differs between versions.
+  - API 2.13 and 2.20 both load version 1 (`uri …/1`), so the snapshot takes geometry from version 1.
+- *Geometry, confirmed in the simulator:* `Well.width` is the definition's **yDimension** and `Well.length` its **xDimension** (`nest_12_reservoir_15ml` A1: width 71.2, length 8.2). `diameter` is None for rectangular wells, and width and length are None for circular ones.
+- *Pipette state:*
+  - `pip.type` is "single" or "multi" by channel count (9.0.0 source).
+  - `hw_pipette` returns a dict with `has_tip`, `channels`, `max_volume`, `min_volume` and `name`.
+  - `current_volume` is the plunger volume (liquid + air), tracked in the front end with Opentrons' zero-volume rules.
+- *Module state:* the magnetic module's `status` is engaged/disengaged (starts disengaged; 9.0.0 source), and the thermocycler's `lid_position` follows open/close calls. Other module state stays opaque and stops on a comparison.
+- *Fixed trash:* below API 2.16 the fixed trash is a labware in slot 12, so `ctx.loaded_labwares[12]` is the trash. That accounted for 49 stops.

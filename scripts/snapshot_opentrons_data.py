@@ -32,16 +32,24 @@ OT2_PIPETTES = [
 ]
 
 
+def well_geometry(well: dict) -> list:
+    """[depth, diameter, width, length] as the API reports them. Confirmed in the simulator:
+    Well.width is yDimension and Well.length is xDimension (D-024)."""
+    return [well["depth"], well.get("diameter"), well.get("yDimension"), well.get("xDimension")]
+
+
 def labware() -> dict:
     root = os.path.join(
         os.path.dirname(opentrons_shared_data.__file__), "data/labware/definitions/2"
     )
     out = {}
     for d in sorted(glob.glob(os.path.join(root, "*"))):
-        latest = max(
+        versions = sorted(
             glob.glob(os.path.join(d, "*.json")), key=lambda p: int(os.path.basename(p)[:-5])
         )
-        j = json.load(open(latest))
+        # Capacities and ordering are identical across versions (checked, D-024); geometry is
+        # not. API 2.x loads version 1 unless a protocol asks otherwise, so we take version 1.
+        j = json.load(open(versions[0]))
         order = [w for col in j["ordering"] for w in col]
         caps = {w: j["wells"][w]["totalLiquidVolume"] for w in order}
         entry = {
@@ -53,6 +61,11 @@ def labware() -> dict:
             entry["capacity"] = caps[order[0]]
         else:
             entry["capacities"] = caps
+        geometry = {w: well_geometry(j["wells"][w]) for w in order}
+        if len({tuple(g) for g in geometry.values()}) == 1:
+            entry["geometry"] = geometry[order[0]]
+        else:
+            entry["geometries"] = geometry
         out[j["parameters"]["loadName"]] = entry
     return out
 

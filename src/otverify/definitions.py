@@ -6,7 +6,7 @@ Source: opentrons-shared-data, Apache-2.0, (c) Opentrons Labworks Inc.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cache
 from importlib import resources
 
@@ -17,6 +17,9 @@ class LabwareDef:
     is_tiprack: bool
     ordering: tuple[tuple[str, ...], ...]  # columns of well names, as in the definition
     capacities: dict[str, float]  # µL per well (totalLiquidVolume)
+    # mm per well: (depth, diameter, width, length) as the API reports them; diameter is None
+    # for rectangular wells, width/length None for circular ones (D-024).
+    geometry: dict[str, tuple[float | None, ...]] = field(default_factory=dict)
 
     def wells(self) -> list[str]:
         return [w for col in self.ordering for w in col]
@@ -49,7 +52,13 @@ def from_definition(definition: dict) -> LabwareDef:
     ordering = tuple(tuple(col) for col in definition["ordering"])
     caps = {w: float(definition["wells"][w]["totalLiquidVolume"]) for col in ordering for w in col}
     params = definition["parameters"]
-    return LabwareDef(params["loadName"], bool(params.get("isTiprack")), ordering, caps)
+    geometry = {w: _geometry(definition["wells"][w]) for col in ordering for w in col}
+    return LabwareDef(params["loadName"], bool(params.get("isTiprack")), ordering, caps, geometry)
+
+
+def _geometry(well: dict) -> tuple[float | None, ...]:
+    """Well.width is yDimension and Well.length is xDimension (confirmed in the simulator)."""
+    return (well.get("depth"), well.get("diameter"), well.get("yDimension"), well.get("xDimension"))
 
 
 def labware(load_name: str, custom: dict[str, LabwareDef] | None = None) -> LabwareDef | None:
@@ -59,11 +68,16 @@ def labware(load_name: str, custom: dict[str, LabwareDef] | None = None) -> Labw
     if entry is None:
         return None
     ordering = tuple(tuple(col) for col in entry["ordering"])
+    wells = [w for col in ordering for w in col]
     if "capacity" in entry:
-        caps = {w: float(entry["capacity"]) for col in ordering for w in col}
+        caps = {w: float(entry["capacity"]) for w in wells}
     else:
         caps = {w: float(v) for w, v in entry["capacities"].items()}
-    return LabwareDef(load_name, entry["is_tiprack"], ordering, caps)
+    if "geometry" in entry:
+        geometry = {w: tuple(entry["geometry"]) for w in wells}
+    else:
+        geometry = {w: tuple(g) for w, g in entry.get("geometries", {}).items()}
+    return LabwareDef(load_name, entry["is_tiprack"], ordering, caps, geometry)
 
 
 def pipette(name: str) -> PipetteDef | None:

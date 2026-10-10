@@ -36,6 +36,11 @@ class WellRef:
     labware: int  # index into Program.labware
     well: str
 
+    def __str__(self) -> str:
+        # Like Opentrons' str(well), "A1 of <labware> on <slot>", whose first word protocols
+        # sometimes parse. The labware's display name is not modelled.
+        return f"{self.well} of labware {self.labware}"
+
 
 @dataclass(frozen=True)
 class LoadedLabware:

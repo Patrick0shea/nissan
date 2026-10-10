@@ -296,6 +296,8 @@ class _Planner:
 
     def _extend(self) -> tuple[list[Any], list[Any]]:
         sources, targets = self.sources, self.dests
+        if not sources or not targets:
+            raise PlanError("integer modulo by zero (ZeroDivisionError)")
         if len(sources) < len(targets):
             if len(targets) % len(sources):
                 raise PlanError("Source and destination lists must be divisible (ValueError)")
