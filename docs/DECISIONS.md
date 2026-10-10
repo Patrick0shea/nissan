@@ -100,3 +100,80 @@ Format: **D-NNN, date: title.** Then the decision, the alternatives considered, 
 - *CLI:* findings are grouped by line. The representative is a default-reachable finding if there is one, otherwise the smallest witness.
 
 **D-015, 2026-10-09: Supersedes the last clause of D-006.** "An `add_int`/`add_float` with no min/max is unbounded" cannot happen. Opentrons rejects such a definition (D-013), so we report it as an invalid definition rather than an unbounded parameter.
+
+**D-016, 2026-10-10: Legacy `get_values` / `fields.json` parameters (implements D-006).**
+- *Confirmed:* the library build (`protolib/parse/parseOT2v2.py`) prepends a `get_values` that returns each field's default. For a dropDown that is `options[0].value`, otherwise `default`.
+- *Decision:* `legacy.py` maps fields to `ParamSpec`s:
+  - **dropDown:** the finite set of option values, default first.
+  - **int/float with a range in the label:** an interval. Recognised forms are `a-b`, `a–b`, `a to b`, `between a and b`, and `up to N` / `max N`, the last two giving `[min(1, default), N]`. If the default lies outside the parsed range, the range is widened to include it and tagged `label+default`.
+  - **Anything else:** the default value only, tagged `default` and printed as `DEFAULT ONLY` in every report.
+- *Corpus (833 protocols):*
+  - dropDown: 1944 fields.
+  - int/float with a label range: 453 fields, 9 of them widened.
+  - int/float at default only: 1731 fields.
+  - str/textFile at default only: 363 fields.
+
+  So most numeric fields are analysed at their default value, and D1 alone cannot carry the parameter-only claim (EVALUATION.md, threats).
+
+**D-017, 2026-10-10: Enumerate int parameters lazily where a concrete value is needed.**
+- *Decision:* An int interval parameter whose domain has at most 400 values may reach a concrete-only position: a loop bound, index, slice, undecided branch, divisor, `int()`, `//`, `%`, labware name or slot. Lowering then restarts with that parameter enumerated, as option (a) from M2.
+- *Reporting:* Programs record `enumerated`. The CLI prints `(enumerated)` per parameter, so enumeration is never confused with SMT proof. Float parameters and larger domains stop lowering, as before.
+- *Reason:* Sample counts (1–96, 1–384) drive loops in almost every corpus protocol. Enumerating them is exact. Path forking (b) is still needed for float-dependent branches.
+
+**D-018, 2026-10-10: Semantics of mix, blow_out, air_gap and the trash, confirmed in opentrons 9.0.0.**
+- *Source:*
+  - `mix(n, v, loc)` is aspirate(v, loc), then (n−1) × [dispense(v), aspirate(v)], then dispense(v). It always does at least one cycle, and `None`/0 follow the aspirate/dispense API rules.
+  - `blow_out(loc)` expels the tip contents into the location. With no location it uses the current well.
+- *Probes* (`experiments/2026-10-09-simulator-probe` style, scratch only):
+  - Air gaps count against tip capacity at both API 2.13 and 2.22: 280 µL + 30 µL air fails.
+  - `mix` with liquid already in the tip can exceed capacity.
+  - `fixed_trash["A1"]` is a valid location.
+- *Modelling choice:* the tip tracks liquid and air separately. The air gap leaves first on dispense, because it was drawn in last, and air is never counted as liquid in a well. Opentrons' own liquid tracking (API ≤ 2.21) counts it, but physically it is air.
+
+**D-019, 2026-10-10: After a symbolic violation, continue under an assumption. Supersedes the symbolic half of the clamp-and-continue rule (D-014).**
+- *Decision:* A symbolic guard that fails is added as an assumption to the well or tip state it constrains. Assumptions flow with the liquid: a well filled from a tip inherits the tip's assumptions. Later checks on that state only consider parameter values for which the earlier guard held. Concrete violations are still clamped.
+- *Why:* Clamping with `If(after > cap, cap, after)` nested one `If` per violating step. A 96-iteration loop with a symbolic volume took more than 100 s in Z3. With assumptions it takes 3 s, and every term stays linear.
+- *Consequences:*
+  - A finding's range is now the parameter region where it is the **first** failure on that state.
+  - The CLI and the JSON output take the union of ranges per line, e.g. `[121, 180] ∪ [181, 400]` becomes `[121, 400]`.
+  - Duplicate reports of an already-overflowing well disappear.
+- *Supporting changes:*
+  - Solver results are cached by (assumptions, guard, amounts) Z3 AST ids across a protocol's Programs. The terms are kept alive in the cache, so their ids cannot be reused by other terms.
+  - Programs whose steps are identical (e.g. differing only in the pipette mount) are checked once.
+
+**D-020, 2026-10-10: transfer / distribute / consolidate by porting `TransferPlan` and testing the port differentially.**
+- *Decision:* `transfers.py` ports opentrons 9.0.0 `TransferPlan` and the `transfer()` option handling. This includes splitting against the pipette maximum but grouping against the tip, mix-before/after only when the tip is empty, falsy mix options falling back to `mix()` defaults, disposal blow-out, lazy errors, and multichannel first-row filtering.
+- *Volume-dependent decisions:* concrete; or proved over the parameter domain with Z3; or enumerated (int) or stopped (float).
+- *Validation:* `scripts/diff_transfers.py` runs random scenarios through the real `InstrumentContext.transfer/distribute/consolidate` in the simulator and through the port, and compares the command sequences. Result: **600 scenarios, 0 mismatches**. 421 plans were identical, 143 raised at the same point, and 36 were identical up to a command that fails when executed (an over-capacity aspirate the plan generates itself, which the checker reports).
+- *Assumption:* the tip is empty when a transfer starts. That only matters for `new_tip="never"` after a manual aspirate.
+- *Findings this enables:*
+  - **CRASH (violation):** Opentrons raises mid-plan, e.g. source/destination lists that are not divisible, or a disposal volume ≥ the pipette maximum.
+  - **API warnings:** keyword arguments Opentrons silently ignores (e.g. `disposal_vol=`, 15 corpus uses). Wells outside the first row silently skipped by a multichannel transfer. A distribute or consolidate that moves no liquid because the volume plus disposal exceeds the tip. Opentrons silently skips that last case, confirmed in `experiments/2026-10-10-silent-noop-distribute/`.
+- *Not ported (reported as unsupported):* `gradient_function`, tuples of wells, and partial-nozzle configurations.
+
+**D-021, 2026-10-10: Front-end semantics for real protocols.**
+- *Branches:*
+  - A parameter-dependent condition is first decided with Z3 over the domain and the path so far.
+  - If it is still undecided and one branch only raises (input validation), the run continues on the other branch with the condition added to `Program.path`, so values the protocol rejects are not analysed.
+  - Otherwise D-017 applies.
+- *Exceptions and loops:*
+  - `raise` ends that run. It is not an analysis gap: the protocol rejected its inputs.
+  - In `try`, the body and `finally` run and the handlers are ignored, because we never model API exceptions such as OutOfTipsError. Tip exhaustion is P3/M4.
+  - `while`, `break` and `continue` are supported, with an iteration cap.
+- *Too many combinations:* beyond 1024 finite-parameter combinations, each finite parameter is varied one at a time from the defaults, and the gap is reported as INCOMPLETE.
+
+**D-022, 2026-10-10: Real-run-only code and the robot environment.**
+- `protocol.is_simulating()` returns **True**, so we follow the branch `opentrons_simulate` takes. In the corpus, real-run-only branches hold tip-state files and rail-light blinking. Supersedes the M2 choice of False.
+- **Files:** `os.path.isfile/exists` return False (a fresh robot with no saved state). Path helpers work on concrete strings, and `makedirs` and `json.dump` are no-ops.
+- **Inert objects:** threads, Points/Locations, file handles, module status and well geometry are opaque values. They absorb arithmetic and cannot reach a volume.
+- **Custom labware:** read from the protocol folder's `labware/*.json`, as the library build does. 522 corpus folders ship such definitions.
+- **User classes:** plain classes with methods and instance attributes are supported. Custom attributes set on wells, labware and pipettes (e.g. `well.liq_vol`) are tracked.
+
+**D-023, 2026-10-10: Wells with unknown contents also get an upper bound. Refines D-009.**
+- *Decision:*
+  - An unknown well's contents are bounded above by min(capacity, upper). `upper` starts at the capacity, goes down with each aspirate and up with each dispense.
+  - An aspirate asking for more than that bound is a **certain** P1b violation ("which can hold at most …").
+  - After a concrete violation, the tip takes in only what the well could have held, so there is no cascading overflow downstream.
+  - Below the bound, aspirates are still assumed to get the volume they ask for. This is the protocol's intent and the D-009 reading: "at least X (even if it started empty)" means assuming the sources supplied what was asked.
+- *Found by:* triage of corpus finding `05f673`. `mix(3, 1000)` in a 360 µL well was being reported as a 1000 µL *overflow* of that well. The real bug is that no 360 µL well can supply 1000 µL.
+- *Effect on the probe fixture:* `overfill.py` aspirates 3 × vol from A1 of the same 360 µL plate. Its first certain failure is now that overdraw, for vol ∈ [121, 400]. The B1 overflow is no longer certain, because A1 could not have supplied the liquid.

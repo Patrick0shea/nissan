@@ -66,7 +66,7 @@ def test_cli_reports_incomplete_analysis(
     f = tmp_path / "p.py"
     f.write_text(
         HEADER.format(api="2.13", tips="opentrons_96_tiprack_300ul", pipette="p300_single_gen2")
-        + "    p.transfer(100, res['A1'], plate['A1'])\n"
+        + "    p.configure_nozzle_layout(style=None)\n"
     )
     assert main([str(f)]) == 3
     assert "INCOMPLETE: analysis stopped at line 8" in capsys.readouterr().out
@@ -259,11 +259,11 @@ def test_list_comprehension_and_module_constants() -> None:
 @pytest.mark.parametrize(
     ("body", "reason"),
     [
-        ('p.transfer(100, res["A1"], plate["A1"])', "pipette.transfer"),
+        ("p.configure_nozzle_layout(style=None)", "pipette.configure_nozzle_layout"),
         ("v = protocol.params.vol", "there is no add_parameters()"),
         ('v = get_values("vol")', "get_values"),
         ('w = plate["H13"]', "well 'H13' does not exist"),
-        ("while True:\n    pass", "While"),
+        ("while True:\n    pass", "while-loop ran more than"),
     ],
 )
 def test_unsupported_constructs_stop_with_reason(body: str, reason: str) -> None:

@@ -43,7 +43,18 @@ def _raw() -> dict:
     return json.loads(text)
 
 
-def labware(load_name: str) -> LabwareDef | None:
+def from_definition(definition: dict) -> LabwareDef:
+    """A LabwareDef from a full Opentrons labware definition (e.g. a protocol's custom labware
+    JSON, loaded like the Protocol Library build does from `protocols/<name>/labware/*.json`)."""
+    ordering = tuple(tuple(col) for col in definition["ordering"])
+    caps = {w: float(definition["wells"][w]["totalLiquidVolume"]) for col in ordering for w in col}
+    params = definition["parameters"]
+    return LabwareDef(params["loadName"], bool(params.get("isTiprack")), ordering, caps)
+
+
+def labware(load_name: str, custom: dict[str, LabwareDef] | None = None) -> LabwareDef | None:
+    if custom and load_name in custom:
+        return custom[load_name]
     entry = _raw()["labware"].get(load_name)
     if entry is None:
         return None
