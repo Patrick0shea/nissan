@@ -396,10 +396,18 @@ class _Lowerer:
             case ast.Assert(test=test):
                 if not self.truth(test, self.expr(test)):
                     raise _Raise(s.lineno)
-            case ast.Try(body=body, orelse=orelse, finalbody=finalbody):
-                # We never model exceptions from the API (e.g. OutOfTipsError), so the handlers
-                # are unreachable in our model (D-021).
-                self.body(body + orelse + finalbody)
+            case ast.Try(body=body, handlers=handlers, orelse=orelse, finalbody=finalbody):
+                # We never model exceptions from the API (e.g. OutOfTipsError), so handlers only
+                # run for the protocol's own `raise`; we take the first handler (D-021).
+                try:
+                    self.body(body)
+                except _Raise:
+                    if not handlers:
+                        raise
+                    self.body(handlers[0].body)
+                else:
+                    self.body(orelse)
+                self.body(finalbody)
             case ast.With(body=body):
                 self.body(body)
             case _:

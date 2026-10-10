@@ -3,7 +3,7 @@
 ## Common model
 - **Parameters.** `P` is a vector of protocol parameters with a domain `D`: integer or real intervals, finite choice sets, and booleans. A property holds iff it holds on **every** execution for **every** `p ∈ D`. A violation is reported with a witness `p*` and the failing step.
 - **State.** Each well `w` has a volume `v(w)` (µL, Z3 `Real`), a capacity `C(w)` = `totalLiquidVolume` from the labware definition, and a set of liquid labels `L(w)`. Each pipette has a tip state (none, or a tip with volume and labels) and a tip-rack cursor.
-- **Initial volumes.** Taken from `load_liquid` where it is present. Otherwise **unknown**, and tracked as a lower bound starting at 0 (D-009, provisional pending Q2).
+- **Initial volumes.** Taken from `load_liquid` where it is present. Otherwise **unknown**, and tracked as an interval: the lower bound starts at 0 and the upper bound at the capacity (D-009, D-023; provisional pending Q2). Only *certain* violations are reported for unknown wells. Aspirates below the upper bound are assumed to get what they ask for (the protocol's intent).
 - **Front end.** We parse with `ast`, resolve `load_labware`, `load_instrument` and `params`/`get_values` bindings, and lower `transfer`/`distribute`/`consolidate`/`mix` into primitive `aspirate`, `dispense`, `pick_up_tip` and `drop_tip` steps. Their expansion semantics, such as splitting volumes above the pipette's maximum and `disposal_volume`, must be confirmed against `opentrons==9.0.0` source before we model them. Loops with concrete trip counts are unrolled. Loops whose trip count depends on a parameter need a summary, which is the main technical risk (see ROADMAP M3).
 
 ---
@@ -91,6 +91,16 @@ protocol.delay(minutes=inc_min)                     # assay requires >= 5 min; i
 **Check.** This is easy once a specification exists. Duration terms come from the AST, and Z3 checks `D ⇒ duration ≥ t_min`. **The hard part is where `t_min` comes from**, because protocols do not state it. The options are a sidecar spec file, structured comments, or numbers extracted from the README. Without a spec, P4 can only flag durations that can be ≤ 0 or that depend on unconstrained parameters. This makes P4 the weakest property. It is scheduled last and may be descoped (Q5).
 
 ---
+
+## Additional finding classes (from M3)
+These came out of modelling `transfer`/`distribute`/`consolidate` faithfully (D-020). They are reported, but they are not one of P1–P4.
+- **CRASH (violation).** Opentrons raises mid-run for these values, e.g. source/destination lists that are not divisible, or a disposal volume ≥ the pipette maximum. `opentrons_simulate` catches these too, but only at the default values.
+- **API (warning).** Opentrons silently does something the author probably did not intend:
+  - a keyword argument it ignores (`disposal_vol=`);
+  - wells outside the first row skipped by a multichannel transfer;
+  - a distribute or consolidate that moves **no liquid**, because each volume plus disposal plus air gap exceeds the tip (`experiments/2026-10-10-silent-noop-distribute/`).
+
+  The simulator raises none of these.
 
 ## Candidate properties, not yet committed
 - Aspirating without a tip, or picking up a tip while already holding one. The simulator catches these at default values. They are cheap to add statically.

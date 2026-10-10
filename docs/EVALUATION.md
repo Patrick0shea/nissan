@@ -52,6 +52,10 @@ All labels go in `eval/labels.csv` with these columns: finding ID, protocol, pro
 
 FP sub-labels: **imprecision**, **domain**, **assumption** and **spec** (the property definition does not fit the protocol's intent, e.g. a deliberate top-dispense with a reused tip).
 
+## Model fidelity (checked before trusting any number)
+- **Command semantics.** `transfer`/`distribute`/`consolidate` are differentially tested against the real `TransferPlan` with `scripts/diff_transfers.py`. Every reported result states the scenario count and mismatches. The primitives (aspirate/dispense zero-volume rules, air gaps, mix, blow-out) are pinned by simulator probes recorded in DECISIONS (D-012, D-018).
+- **Witness replay.** Every TP label requires replaying the witness in `opentrons_simulate` with that parameter assignment (`experiments/2026-10-10-e9ff8d-tiprack-option/reproduce.sh` is the template). Where the simulator cannot observe the violation, e.g. well overflow, the B2+ tracker is used, and the label says so.
+
 ## Threats to validity, tracked up front
 - D1 is old: API ≤ 2.13 and no `add_parameters`. Its parameter domains are inferred, not declared, so D1 alone cannot test the "optimiser-chosen parameters" story. D2 and D3 carry that story.
 - The mutation operators are ours, so recall on D3 is biased toward what we model. We mitigate this by defining the operators before implementation and logging them in DECISIONS.

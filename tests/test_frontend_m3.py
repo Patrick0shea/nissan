@@ -294,3 +294,15 @@ def test_tip_state_files_follow_the_simulation_branch() -> None:
         p.dispense(20 + starting, plate["A1"])
     """
     assert dispensed(body) == [("A1", 20.0)]
+
+
+def test_protocol_raise_inside_try_runs_the_handler() -> None:
+    body = """
+        p.pick_up_tip()
+        try:
+            raise ValueError("bad input")
+        except ValueError:
+            p.aspirate(15, res["A1"])
+            p.dispense(15, plate["A1"])
+    """
+    assert dispensed(body) == [("A1", 15.0)]
