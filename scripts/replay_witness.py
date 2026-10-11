@@ -27,7 +27,12 @@ def defaults(fields: list[dict]) -> dict:
     }
 
 
-def replay(protocol: Path, witness: dict, simulate: str) -> tuple[str, str]:
+HEADER_LINES = 4  # the injected get_values() shifts the protocol's line numbers
+
+
+def replay(protocol: Path, witness: dict, simulate: str, line: int = 0) -> tuple[str, str]:
+    """("confirmed", error): the simulator fails at the finding's line. Other outcomes:
+    "raises-elsewhere", "passes", "unreplayable" (the protocol does not load), "timeout"."""
     folder = protocol.parent
     fields_path = folder / "fields.json"
     if not fields_path.is_file():
@@ -44,8 +49,16 @@ def replay(protocol: Path, witness: dict, simulate: str) -> tuple[str, str]:
             proc = subprocess.run(cmd + [str(script)], capture_output=True, text=True, timeout=600)
         except subprocess.TimeoutExpired:
             return "timeout", ""
-    errors = [line for line in (proc.stdout + proc.stderr).splitlines() if "Error" in line]
-    return ("raises", errors[-1][:200]) if errors or proc.returncode else ("passes", "")
+    output = proc.stdout + proc.stderr
+    errors = [x for x in output.splitlines() if "Error" in x]
+    if not errors and not proc.returncode:
+        return "passes", ""
+    last = errors[-1][:200] if errors else output.strip().splitlines()[-1][:200]
+    if any(e in output for e in ("ModuleNotFoundError", "ImportError", "SyntaxError")):
+        return "unreplayable", last
+    if line and f"[line {line + HEADER_LINES}]" in output:
+        return "confirmed", last
+    return "raises-elsewhere", last
 
 
 def main() -> None:
@@ -58,9 +71,12 @@ def main() -> None:
         for f in r["findings"]:
             if f["severity"] != "violation" or f["at_default"] or f["property"] not in wanted:
                 continue
-            outcome, detail = replay(Path(r["protocol"]), f["witness"], simulate)
+            control, _ = replay(Path(r["protocol"]), {}, simulate)
+            outcome, detail = replay(Path(r["protocol"]), f["witness"], simulate, f["line"])
+            if control != "passes":
+                outcome = f"{outcome} (defaults: {control})"
             name = Path(r["protocol"]).parent.name
-            print(f"{name:32} L{f['line']:<4} {f['property']:5} {outcome:7} {detail}", flush=True)
+            print(f"{name:32} L{f['line']:<4} {f['property']:5} {outcome:16} {detail}", flush=True)
             break  # one witness per protocol
 
 

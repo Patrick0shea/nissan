@@ -1,0 +1,10 @@
+17cb2d                           L40   P1c   confirmed        opentrons.protocols.execution.errors.ExceptionInProtocolError: AssertionError [line 44]: Cannot aspirate more than pipette max volume
+1eeb01                           L145  P1c   confirmed        opentrons.protocols.execution.errors.ExceptionInProtocolError: AssertionError [line 149]: Cannot aspirate more than pipette max volume
+2c62b7                           L332  P1c   confirmed        opentrons.protocols.execution.errors.ExceptionInProtocolError: AssertionError [line 336]: Cannot aspirate more than pipette max volume
+3db190                           L106  P1c   confirmed        opentrons.protocols.execution.errors.ExceptionInProtocolError: AssertionError [line 110]: Cannot aspirate more than pipette max volume
+412ec7                           L75   TIP   confirmed        opentrons.protocols.execution.errors.ExceptionInProtocolError: UnexpectedTipRemovalError [line 79]: Error 3005 UNEXPECTED_TIP_REMOVAL (UnexpectedTipRemovalError): Cannot perform PREPARE_ASPIRATE witho
+51df08                           L164  CRASH confirmed        opentrons.protocols.execution.errors.ExceptionInProtocolError: TypeError [line 168]: []
+customizable_serial_dilution_ot2 L107  P1c   confirmed        opentrons.protocols.execution.errors.ExceptionInProtocolError: AssertionError [line 111]: Cannot aspirate more than pipette max volume
+e9ff8d_part2                     L112  P1c   confirmed        opentrons.protocols.execution.errors.ExceptionInProtocolError: AssertionError [line 116]: Cannot aspirate more than pipette max volume
+e9ff8d_part4                     L111  P1c   confirmed        opentrons.protocols.execution.errors.ExceptionInProtocolError: AssertionError [line 115]: Cannot aspirate more than pipette max volume
+generic_pcr_prep_2               L282  P1c   unreplayable (defaults: unreplayable) ModuleNotFoundError: No module named 'opentrons.protocol_api.contexts'

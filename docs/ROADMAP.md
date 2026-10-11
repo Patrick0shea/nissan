@@ -7,7 +7,7 @@ Timeframes are rough and assume about 15 h/week. The weeks are relative to the s
 | **M0** ✅ | Project setup | Docs, skeleton, simulator probe (this commit) | 0 |
 | **M1** ✅ | Concrete volume checker on one toy protocol | A front end handles `load_labware`, `load_instrument`, `aspirate`, `dispense`, `pick_up_tip`, `drop_tip` and constant `for` loops. P1(a–c) are checked with concrete values on `tests/fixtures/toy_overfill.py`, with capacities from the labware definitions. | 1–2 |
 | **M2** ✅ | Symbolic parameters + Z3 | `add_parameters` domains become Z3 variables. P1 is checked ∀`p`, with witness output. `overfill.py` reports `vol > 120`. | 3–5 |
-| **M3** | Corpus front end | `get_values` and `fields.json` ingestion. Domain inference (D-006). `transfer`, `distribute`, `consolidate` and `mix` are lowered, with semantics checked against 9.0.0 source. Parameter-dependent loop bounds are handled for `range(param)` patterns. `UNSUPPORTED` reporting. Coverage is measured on D1. | 6–9 |
+| **M3** ✅ | Corpus front end | `get_values` and `fields.json` ingestion. Domain inference (D-006). `transfer`, `distribute`, `consolidate` and `mix` are lowered, with semantics checked against 9.0.0 source. Parameter-dependent loop bounds are handled for `range(param)` patterns. `UNSUPPORTED` reporting. Coverage is measured on D1. | 6–9 |
 | **M4** | P3 resources | Slot, labware, mount, well-index and tip-count checks, ∀`p`. | 10–11 |
 | **M5** | P2 contamination | Taint domain, labelling heuristic, and `new_tip` modes. | 12–14 |
 | **M6** | P4 timing | A spec format is decided, and delay and module-hold checks are implemented. May be descoped. | 15 |
@@ -30,6 +30,17 @@ Timeframes are rough and assume about 15 h/week. The weeks are relative to the s
     - (c) Summarise loops.
 
     Decide (a) vs (b) at the start of M3.
+
+- **M3 (2026-10-11).** `experiments/2026-10-11-d1-witness-replay/` has the full numbers. In brief, at commit c55493f:
+  - **476 of 832 D1 protocols are fully analysed (57%).** 831 complete without error, and 1 times out.
+  - 157 protocols have at least one violation; 41 of those have a parameter-only violation.
+  - The front end now covers `get_values`/`fields.json`, the TransferPlan port (1500 differential scenarios, 0 mismatches), lazy int enumeration, helpers, classes, modules, geometry, custom labware and `pause()` semantics.
+  - **Ground truth so far:** all 9 replayable parameter-only P1c/TIP/CRASH findings are confirmed by `opentrons_simulate` at the reported line. Their defaults pass, so B1 misses all 9.
+  - **Precision work before M4:**
+    - label a sample of P1a/P1b findings (the simulator cannot observe them);
+    - the main coverage gaps: legacy `CancellationToken`-style blocks are fixed, but 34 protocols still exceed 1024 finite combinations, 23 hit unsupported 8-channel layouts, and there is a tail of rare Python;
+    - 594 protocols carry DEFAULT-ONLY parameters (Q1).
+  - **Opened:** path forking for float-dependent branches is still not done (option b). It affects 13 protocols ("argument depends on a parameter").
 
 ## Risks
 - **Loop summarisation (M3).** Corpus loops over `range(num_samples)` with list slicing need symbolic trip counts. The fallback is bounded unrolling up to the domain maximum when that maximum is small (≤ 96 or 384), with the bound reported.

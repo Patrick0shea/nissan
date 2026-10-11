@@ -206,3 +206,15 @@ Format: **D-NNN, date: title.** Then the decision, the alternatives considered, 
 - *Decision:* at a `pause()`, every well's contents become unknown again, within [0, capacity]. Known (`load_liquid`) volumes are forgotten too. Reports stay *certain* whatever the person did.
 - *Cost:* a bug whose cause and effect are separated by a pause is missed, e.g. overfilling a sample well across a pause where nobody touched it.
 - *Alternative:* use the pause message to decide which wells change. That is fragile, but could be explored with the user.
+
+**D-027, 2026-10-11: Validation numbers for the transfer port and witness replay. Updates D-020.**
+- *Differential test:* `scripts/diff_transfers.py` was extended to transfers into the trash, which found two port bugs, both fixed:
+  - the fixed trash passes Opentrons' first-row filter;
+  - from API 2.16 a TrashBin is not a valid transfer() location or mix() location (TypeError).
+
+  The final run has **1500 scenarios and 0 mismatches**: 1097 identical plans, 315 raising at the same point, and 88 identical up to a command that fails when executed.
+- *Witness replay (`scripts/replay_witness.py`):* a finding counts as **confirmed** only if:
+  1. the protocol passes at its defaults (the control); and
+  2. with the witness injected, `opentrons_simulate` fails **at the reported line**.
+
+  Protocols that cannot load in 9.0.0 are "unreplayable", never counted as confirmed. This rule was tightened after the first version counted a `ModuleNotFoundError` as a failure.

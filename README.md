@@ -2,7 +2,7 @@
 
 A research prototype. It checks Opentrons Python protocols (API v2) for volume, contamination, resource and timing bugs **for every parameter value in a declared range**, using static analysis plus the Z3 SMT solver. The target users are self-driving labs, where an optimiser picks parameter values at runtime.
 
-Status: milestone M2. `otverify protocol.py` checks well overflow, overdraw and tip volume for **every** value of the `add_parameters` runtime parameters (Z3). It reports a witness, the violating range, and whether the bug is reachable at the default values. Not yet supported: `get_values`, `transfer`/`distribute`, or control flow that depends on a parameter. See [docs/ROADMAP.md](docs/ROADMAP.md).
+Status: milestone M3. `otverify protocol.py` checks well overflow, overdraw and tip volume for every value of the protocol's parameters. Those are `add_parameters`, or the library's `get_values`/`fields.json` (auto-detected next to the protocol). It reports a witness, the violating range, and whether the bug is reachable at the default values. On the public Protocol Library it fully analyses 476 of 832 protocols. It found 9 parameter-only bugs, each confirmed by `opentrons_simulate` at the exact line, which the default simulation misses (`experiments/2026-10-11-d1-witness-replay/`). See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Why
 `opentrons_simulate` checks one run, at default parameter values. For example, it accepts a protocol that dispenses 3 × `vol` µL into a 360 µL well when `vol` defaults to 100, even though `vol` may go up to 300. See `experiments/2026-10-09-simulator-probe/`.
