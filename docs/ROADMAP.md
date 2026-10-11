@@ -38,9 +38,9 @@ Timeframes are rough and assume about 15 h/week. The weeks are relative to the s
   - **Ground truth so far:** all 9 replayable parameter-only P1c/TIP/CRASH findings are confirmed by `opentrons_simulate` at the reported line. Their defaults pass, so B1 misses all 9.
   - **Precision work before M4:**
     - label a sample of P1a/P1b findings (the simulator cannot observe them);
-    - the main coverage gaps: legacy `CancellationToken`-style blocks are fixed, but 34 protocols still exceed 1024 finite combinations, 23 hit unsupported 8-channel layouts, and there is a tail of rare Python;
+    - the main coverage gaps: 83 protocols exceed 1024 finite combinations (analysed one factor at a time, reported INCOMPLETE), 38 hit unsupported 8-channel layouts, and there is a tail of rare Python (`commands()`, `__name__`, private hardware state);
     - 594 protocols carry DEFAULT-ONLY parameters (Q1).
-  - **Opened:** path forking for float-dependent branches is still not done (option b). It affects 13 protocols ("argument depends on a parameter").
+  - **Opened:** path forking for float-dependent branches is still not done (option b). It affects about 13 protocols, e.g. `math.ceil(wash1_vol / …)` on a float parameter.
 
 ## Risks
 - **Loop summarisation (M3).** Corpus loops over `range(num_samples)` with list slicing need symbolic trip counts. The fallback is bounded unrolling up to the domain maximum when that maximum is small (≤ 96 or 384), with the bound reported.
