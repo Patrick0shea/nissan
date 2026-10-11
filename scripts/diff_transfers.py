@@ -13,6 +13,7 @@ sides must raise, or both must produce the same command sequence.
 import logging
 import random
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -34,6 +35,14 @@ PIPETTES = [
 APIS = ["2.0", "2.2", "2.7", "2.8", "2.9", "2.11", "2.13", "2.15", "2.16", "2.17"]
 RECORDED = ["pick_up_tip", "drop_tip", "return_tip", "aspirate", "dispense", "mix", "air_gap",
             "blow_out", "touch_tip"]  # fmt: skip
+
+
+@dataclass(frozen=True)
+class HWell:
+    """A well on our side of the comparison (not a tuple: the port rejects tuples of wells)."""
+
+    labware: str
+    well: str
 
 
 def loc_key(loc: object) -> object:
@@ -87,6 +96,7 @@ def normalise_real(name: str, args: tuple, kwargs: dict) -> tuple:
 
 def normalise_ours(cmd: tuple) -> tuple:
     name, *args = cmd
+    args = [(a.labware, a.well) if isinstance(a, HWell) else a for a in args]
     if name in ("aspirate", "dispense"):
         return (name, vol(args[0]), args[1])
     if name == "mix":
@@ -212,14 +222,19 @@ def run_ours(s: dict) -> tuple[str, object]:
     def conv(x: object) -> object:
         if isinstance(x, list):
             return [conv(i) for i in x]
-        return loc_key(x)
+        key = loc_key(x)
+        return HWell(*key) if isinstance(key, tuple) else key
 
     rows = {}
     for lw in (plate, res):
         layout = [[w.well_name for w in row] for row in lw.rows()]
         rows[lw.load_name] = layout
 
-    def valid_row(key: tuple) -> bool:
+    def valid_row(key: object) -> bool:
+        if key == "trash":
+            return True
+        assert isinstance(key, HWell)
+        key = (key.labware, key.well)
         layout = rows[key[0]]
         first = layout[:2] if api >= (2, 2) and len(layout) == 16 else layout[:1]
         return any(key[1] in r for r in first)

@@ -199,6 +199,10 @@ class _Planner:
                 f"air_gap must be between 0uL and the pipette's expected working volume, "
                 f"{tip_max}uL (ValueError)"
             )
+        if api >= (2, 16) and any(type(w) is type(trash) for w in _flat(sources) + _flat(dests)):
+            # From API 2.16 the trash is a TrashBin, which the v1 TransferPlan cannot take as a
+            # source or destination (TypeError, found by the differential test).
+            raise PlanError("a trash bin is not a transfer location (TypeError)")
         if channels > 1:
             self.sources = self._multichannel(sources, valid_row, "source")
             self.dests = self._multichannel(dests, valid_row, "target")
@@ -441,6 +445,10 @@ class _Planner:
     # ---- emitting, and the pipette's current volume -------------------------------------------
 
     def emit(self, method: str, *args: Any) -> None:
+        if method == "mix" and self.api >= (2, 16) and type(args[2]) is type(self.trash):
+            # From API 2.16 the trash is a TrashBin, which mix() rejects (TypeError, found by
+            # the differential test). Below 2.16 it is a well of the fixed-trash labware.
+            raise PlanError("mix in the trash bin (TypeError)")
         self.out.append((method, *args))
         if method in ("pick_up_tip", "drop_tip", "return_tip", "blow_out"):
             self.cur = 0
@@ -466,3 +474,9 @@ def _sum(grouped: Sequence[tuple[Num, Any]]) -> Num:
     for vol, _ in grouped:
         total = total + vol
     return total
+
+
+def _flat(x: Any) -> list[Any]:
+    if isinstance(x, list):
+        return [w for item in x for w in _flat(item)]
+    return [x]
