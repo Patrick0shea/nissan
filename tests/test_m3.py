@@ -245,3 +245,45 @@ def test_unknown_well_upper_bound_tracks_removals() -> None:
     """
     [f] = check(body).violations
     assert f.property == OVERDRAW and f.line == 11 and "can hold at most 60 µL" in f.message
+
+
+def test_over_aspiration_sent_to_trash_is_a_warning() -> None:
+    # Removal of 2 x 200 µL from a 360 µL well (whatever it held) straight to the trash.
+    body = """
+        p.pick_up_tip()
+        p.aspirate(200, plate["A1"])
+        p.dispense(200, protocol.fixed_trash["A1"])
+        p.aspirate(200, plate["A1"])
+        p.dispense(200, protocol.fixed_trash["A1"])
+        p.drop_tip()
+    """
+    result = check(body)
+    assert result.violations == []
+    assert {f.property for f in result.findings} == {OVERDRAW}
+    assert all("intended over-aspiration?" in f.message for f in result.findings)
+
+
+def test_over_aspiration_delivered_to_a_well_stays_a_violation() -> None:
+    body = """
+        p.pick_up_tip()
+        p.aspirate(300, plate["A1"])
+        p.dispense(100, plate["A2"])
+        p.aspirate(100, plate["A1"])
+        p.dispense(100, plate["A3"])
+    """
+    [f] = check(body).violations
+    assert f.property == OVERDRAW and f.line == 11
+
+
+def test_shortfall_enters_the_tip_as_air() -> None:
+    # 50 µL declared, 100 µL aspirated: 50 µL liquid + 50 µL air. Dispensing 100 µL is then
+    # fine (no P1c), and the destination receives only 50 µL of liquid.
+    body = """
+        plate["A1"].load_liquid(protocol.define_liquid("x"), 50)
+        p.pick_up_tip()
+        p.aspirate(100, plate["A1"])
+        p.dispense(100, plate["B1"])
+        plate["B1"].load_liquid(protocol.define_liquid("y"), 0)
+    """
+    result = check(body)
+    assert [f.property for f in result.findings] == [OVERDRAW]

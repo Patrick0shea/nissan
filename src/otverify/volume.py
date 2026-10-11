@@ -35,7 +35,7 @@ Semantics confirmed against opentrons 9.0.0 (D-012, D-018):
 
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 
 import z3
@@ -172,6 +172,8 @@ class _Tip:
     liquid: Num = 0.0  # per channel
     air: Num = 0.0  # per channel; air gaps count against tip capacity (D-018)
     assume: Assume = ()
+    # Overdraw findings waiting to learn where this tip's liquid goes (D-025).
+    pending: list[Finding] = field(default_factory=list)
 
 
 def _fmt(v: object) -> str:
@@ -375,8 +377,10 @@ class _Checker:
                 case LoadLiquid():
                     self.load_liquid(step)
                 case PickUpTip(pipette=p):
+                    self.settle(self.tips[p], delivered=False)
                     self.tips[p] = _Tip(attached=True)
                 case DropTip(pipette=p):
+                    self.settle(self.tips[p], delivered=False)
                     self.tips[p] = _Tip()
                 case Aspirate():
                     self.aspirate(step)
@@ -386,6 +390,8 @@ class _Checker:
                     self.air_gap(step)
                 case BlowOut():
                     self.blow_out(step)
+        for tip in self.tips:
+            self.settle(tip, delivered=True)  # still in the tip at the end: keep as violations
 
     def load_liquid(self, step: LoadLiquid) -> None:
         cap = self.capacity(step.well)
@@ -431,9 +437,25 @@ class _Checker:
             tip.assume = _merge(tip.assume, (bad,))
         return volume
 
+    def settle(self, tip: _Tip, delivered: bool) -> None:
+        """Report the tip's pending overdraws. An overdraw only matters if the liquid is
+        delivered to a well (D-025). If it goes to the trash, or the tip is dropped first, it is
+        a removal step, often an intended over-aspiration, and is reported as a warning."""
+        for f in tip.pending:
+            if not delivered:
+                f = replace(
+                    f,
+                    severity="warning",
+                    message=f.message + "; the liquid then goes to the trash "
+                    "(an intended over-aspiration?)",
+                )
+            self.result.findings.append(f)
+        tip.pending = []
+
     def aspirate(self, step: Aspirate) -> None:
         if (tip := self.tip(step, step.pipette, "aspirate")) is None:
             return
+        first_new = len(self.result.findings)
         volume = self.take_in(step, tip, step.pipette, step.volume, "aspirating")
         taken = volume
         for w in step.wells:
@@ -474,11 +496,20 @@ class _Checker:
                 assume,
             )
             if bad is False:
+                taken = _min_const(taken, st.volume)  # only what the well held
                 st.volume = smax(0.0, st.volume - volume)
             else:
                 st.volume = st.volume - volume
                 st.assume = assume if bad is None else _merge(assume, (bad,))
-        tip.liquid = tip.liquid + (taken if not is_sym(taken) else volume)
+        liquid_in = taken if not is_sym(taken) else volume
+        tip.liquid = tip.liquid + liquid_in
+        if not is_sym(liquid_in) and not is_sym(volume) and volume > liquid_in:
+            tip.air = tip.air + (volume - liquid_in)  # the plunger still draws `volume`: air
+        new = self.result.findings[first_new:]
+        keep = [f for f in new if not (f.property == OVERDRAW and f.severity == "violation")]
+        tip.pending.extend(f for f in new if f not in keep)
+        del self.result.findings[first_new:]
+        self.result.findings.extend(keep)
 
     def air_gap(self, step: AirGap) -> None:
         if (tip := self.tip(step, step.pipette, "air gap")) is None:
@@ -523,11 +554,13 @@ class _Checker:
         liquid_out = volume - air_out
         tip.air = tip.air - air_out
         tip.liquid = tip.liquid - liquid_out
+        self.settle(tip, delivered=bool(step.wells))
         self.deliver(step, step.wells, liquid_out, tip.assume)
 
     def blow_out(self, step: BlowOut) -> None:
         if (tip := self.tip(step, step.pipette, "blow out")) is None:
             return
+        self.settle(tip, delivered=bool(step.wells))
         self.deliver(step, step.wells, tip.liquid, tip.assume)
         tip.liquid, tip.air = 0.0, 0.0
 

@@ -191,3 +191,12 @@ Format: **D-NNN, date: title.** Then the decision, the alternatives considered, 
   - `current_volume` is the plunger volume (liquid + air), tracked in the front end with Opentrons' zero-volume rules.
 - *Module state:* the magnetic module's `status` is engaged/disengaged (starts disengaged; 9.0.0 source), and the thermocycler's `lid_position` follows open/close calls. Other module state stays opaque and stops on a comparison.
 - *Fixed trash:* below API 2.16 the fixed trash is a labware in slot 12, so `ctx.loaded_labwares[12]` is the trash. That accounted for 49 stops.
+
+**D-025, 2026-10-11 (provisional): An overdraw matters only if the liquid is delivered.**
+- *What exposed it:* triage of the M3 corpus run. Many P1b findings are magnetic-bead clean-ups that deliberately aspirate more than a well holds "to improve completeness of removal" (e.g. `11bb6a-part-6` line 252), and send that air plus residue to the trash. That violates P1b's letter, but it is intended and harmless.
+- *Decision:* P1b findings are held per tip until the liquid's destination is known:
+  - **Dispensed or blown out into a well** (including mixing back into the same well): a **violation**. The shortfall reaches the experiment.
+  - **Sent to the trash, or the tip dropped first:** a **warning**, "the liquid then goes to the trash (an intended over-aspiration?)".
+  - **Still in the tip at the end of the run:** a violation (conservative).
+- *Alternative:* keep every P1b a violation and leave it to labelling. That would make P1b precision meaningless.
+- *Status:* provisional. A refinement of PROPERTIES P1(b); revisit with the user.
