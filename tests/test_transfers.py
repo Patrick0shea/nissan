@@ -111,8 +111,16 @@ def test_crash_is_a_violation_and_ends_the_run() -> None:
 
 
 def test_multichannel_skips_wells_outside_first_row() -> None:
-    result = check('p.transfer(20, res["A1"], plate.wells()[:16])', pipette="p300_multi_gen2")
+    # B2 is dropped by Opentrons' first-row filter and no kept well's column covers it.
+    body = 'p.transfer(20, res["A1"], [plate["A1"], plate["B2"]])'
+    result = check(body, pipette="p300_multi_gen2")
     assert any("silently skipped by a 8-channel transfer()" in f.message for f in result.findings)
+
+
+def test_multichannel_column_lists_are_not_skipped() -> None:
+    # Whole columns: B1..H1 are dropped by the filter but reached by the channels at A1.
+    result = check('p.transfer(20, res["A1"], plate.wells()[:16])', pipette="p300_multi_gen2")
+    assert not any("silently skipped" in f.message for f in result.findings)
 
 
 FIELDS = [
@@ -164,3 +172,17 @@ def test_enumerated_sample_count_in_transfer() -> None:
 def test_not_ported(call: str, reason: str) -> None:
     [prog] = lower_body(call)
     assert prog.unsupported is not None and reason in prog.unsupported.reason
+
+
+def test_multichannel_transfer_into_the_trash() -> None:
+    # Corpus 6f4e2c: an 8-channel transfer to fixed_trash["A1"]. The trash passes Opentrons'
+    # first-row filter (a one-row labware); witness replay showed the simulator runs it.
+    body = 'p.transfer(100, plate.columns()[0], ctx.fixed_trash["A1"], new_tip="once")'
+    [prog] = lower_body(body, pipette="p300_multi_gen2")
+    assert prog.unsupported is None and not prog.lint
+    assert [type(s).__name__ for s in prog.steps] == [
+        "PickUpTip",
+        "Aspirate",
+        "Dispense",
+        "DropTip",
+    ]

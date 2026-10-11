@@ -1388,6 +1388,8 @@ class _Lowerer:
             return bool(cond)
 
         def valid_row(loc: Any) -> bool:
+            if isinstance(loc, _Trash):
+                return True  # the fixed trash is a one-row labware (found by witness replay)
             if not isinstance(loc, WellRef):
                 return False
             rows = self.defs[loc.labware].rows()
@@ -1395,12 +1397,11 @@ class _Lowerer:
             return any(loc.well in row for row in first)
 
         if pip_def.channels > 1:
-            skipped = [
-                w.well
-                for x in (source, dest)
-                for w in _flatten(x)
-                if isinstance(w, WellRef) and not valid_row(w)
-            ]
+            # Wells outside the first row are dropped by Opentrons. That is harmless when a kept
+            # well's column covers them (the 8 channels reach them anyway).
+            wells = [w for x in (source, dest) for w in _flatten(x) if isinstance(w, WellRef)]
+            covered = {c for w in wells if valid_row(w) for c in self.channel_wells(call, pip, w)}
+            skipped = [w.well for w in wells if not valid_row(w) and w not in covered]
             if skipped:
                 self.lint(
                     call,

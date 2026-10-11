@@ -136,6 +136,7 @@ def scenario(rng: random.Random) -> dict:
     s["n_src"] = rng.choice([1, 1, 2, 3, 4, 8])
     s["n_dst"] = rng.choice([1, 2, 3, 4, 6, 8, 12])
     s["shape"] = rng.choice(["wells", "columns"])
+    s["to_trash"] = s["mode"] == "transfer" and rng.random() < 0.15
     return s
 
 
@@ -145,7 +146,7 @@ def run_real(s: dict) -> tuple[str, object]:
     plate = ctx.load_labware("corning_96_wellplate_360ul_flat", 2)
     res = ctx.load_labware("nest_12_reservoir_15ml", 3)
     instr = ctx.load_instrument(s["pipette"], "left", tip_racks=racks)
-    src, dst = pick_wells(s, plate, res)
+    src, dst = pick_wells(s, plate, res, ctx)
     if s["kwargs"].get("new_tip") == "never":
         instr.pick_up_tip()
     log: list = []
@@ -174,7 +175,7 @@ def transfers_count(s: dict, src: object, dst: object) -> int:
     return max(n(src), n(dst))
 
 
-def pick_wells(s: dict, plate, res) -> tuple:
+def pick_wells(s: dict, plate, res, ctx) -> tuple:
     if s["shape"] == "columns":
         src = (
             res.wells()[: s["n_src"]]
@@ -191,6 +192,9 @@ def pick_wells(s: dict, plate, res) -> tuple:
         src = src[0] if not isinstance(src[0], list) else src[0][0]
     if s["mode"] == "consolidate":
         dst = res.wells()[0]
+    if s.get("to_trash"):
+        trash = ctx.fixed_trash
+        dst = trash if type(trash).__name__ == "TrashBin" else trash["A1"]
     if len(src) == 1 if isinstance(src, list) else False:
         src = src[0]
     return src, dst
@@ -202,7 +206,7 @@ def run_ours(s: dict) -> tuple[str, object]:
     plate = ctx.load_labware("corning_96_wellplate_360ul_flat", 2)
     res = ctx.load_labware("nest_12_reservoir_15ml", 3)
     instr = ctx.load_instrument(s["pipette"], "left", tip_racks=racks)
-    src, dst = pick_wells(s, plate, res)
+    src, dst = pick_wells(s, plate, res, ctx)
     api = tuple(int(x) for x in s["api"].split("."))
 
     def conv(x: object) -> object:
