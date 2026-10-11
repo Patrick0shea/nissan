@@ -200,3 +200,9 @@ Format: **D-NNN, date: title.** Then the decision, the alternatives considered, 
   - **Still in the tip at the end of the run:** a violation (conservative).
 - *Alternative:* keep every P1b a violation and leave it to labelling. That would make P1b precision meaningless.
 - *Status:* provisional. A refinement of PROPERTIES P1(b); revisit with the user.
+
+**D-026, 2026-10-11 (provisional, part of Q2): `protocol.pause()` lets a person change any well.**
+- *What exposed it:* corpus finding `029f5b`. About 582 mL is drawn from one 195 mL reservoir, but each step is preceded by `ctx.pause("Remove Lysis Buffer and replace with Chloroform on site 6")`. Refills at pauses, and waste emptying at pauses, are routine.
+- *Decision:* at a `pause()`, every well's contents become unknown again, within [0, capacity]. Known (`load_liquid`) volumes are forgotten too. Reports stay *certain* whatever the person did.
+- *Cost:* a bug whose cause and effect are separated by a pause is missed, e.g. overfilling a sample well across a pause where nobody touched it.
+- *Alternative:* use the pause message to decide which wells change. That is fragile, but could be explored with the user.

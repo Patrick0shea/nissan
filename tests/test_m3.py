@@ -287,3 +287,20 @@ def test_shortfall_enters_the_tip_as_air() -> None:
     """
     result = check(body)
     assert [f.property for f in result.findings] == [OVERDRAW]
+
+
+def test_pause_lets_a_person_refill_or_empty_wells() -> None:
+    # 029f5b pattern: "Remove Lysis Buffer and replace with Chloroform on site 6".
+    body = """
+        p.pick_up_tip()
+        p.aspirate(300, plate["A1"])
+        p.dispense(300, res["A1"])
+        protocol.pause("Refill plate well A1")
+        p.aspirate(300, plate["A1"])
+        p.dispense(300, res["A1"])
+        protocol.pause("Empty the waste")
+        p.aspirate(300, plate["A1"])
+        p.dispense(300, plate["B1"])
+    """
+    result = check(body)
+    assert result.violations == []  # without the pauses: A1 overdraw and B1/res checks differ

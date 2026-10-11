@@ -109,6 +109,11 @@ class BlowOut(Step):
 
 
 @dataclass(frozen=True)
+class Pause(Step):
+    """protocol.pause(): a person may refill, empty or replace any well before resuming."""
+
+
+@dataclass(frozen=True)
 class Unsupported:
     line: int
     reason: str

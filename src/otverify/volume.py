@@ -48,6 +48,7 @@ from otverify.model import (
     Dispense,
     DropTip,
     LoadLiquid,
+    Pause,
     PickUpTip,
     Program,
     Step,
@@ -390,6 +391,10 @@ class _Checker:
                     self.air_gap(step)
                 case BlowOut():
                     self.blow_out(step)
+                case Pause():
+                    # A person may refill, empty or replace any well (D-026): every well's
+                    # contents become unknown again, within [0, capacity].
+                    self.wells.clear()
         for tip in self.tips:
             self.settle(tip, delivered=True)  # still in the tip at the end: keep as violations
 

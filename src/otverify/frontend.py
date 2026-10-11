@@ -55,6 +55,7 @@ from otverify.model import (
     LoadedPipette,
     LoadLiquid,
     ParamSpec,
+    Pause,
     PickUpTip,
     Program,
     Unsupported,
@@ -70,7 +71,7 @@ MAX_CALL_DEPTH = 50
 DECIDE_TIMEOUT_MS = 5_000
 
 # ProtocolContext / InstrumentContext / module methods that cannot change any liquid volume.
-_CTX_NOOPS = {"comment", "delay", "pause", "home", "set_rail_lights", "resume"}
+_CTX_NOOPS = {"comment", "delay", "home", "set_rail_lights", "resume"}
 _PIPETTE_NOOPS = {"touch_tip", "home", "home_plunger", "move_to_well", "reset_tipracks"}
 _STR_METHODS = {
     "split", "strip", "rstrip", "lstrip", "splitlines", "upper", "lower", "replace", "title",
@@ -1158,6 +1159,9 @@ class _Lowerer:
 
     def ctx_call(self, call: ast.Call, method: str) -> Any:
         if method in _CTX_NOOPS:
+            return None
+        if method == "pause":
+            self.emit(Pause(call.lineno, self.ctx()))
             return None
         if method == "is_simulating":
             # Follow the simulation branch, as opentrons_simulate does: real-run-only branches
